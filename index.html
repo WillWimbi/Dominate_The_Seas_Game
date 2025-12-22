@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0">
+    <title>Naval Command</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; background: #0a1929; }
+        #gameCanvas { display: block; position: absolute; top: 0; left: 0; }
+
+        /* Menu overlay - transparent with blur */
+        #menuOverlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 25, 41, 0.85); backdrop-filter: blur(8px);
+            display: flex; justify-content: center; align-items: center;
+            z-index: 100;
+        }
+        #menuOverlay.hidden { display: none; }
+
+        /* Player login popup */
+        #loginPopup {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: #1a3a5c; border: 2px solid #3a6a9c; border-radius: 8px;
+            padding: 24px; z-index: 200; color: #fff; min-width: 300px;
+        }
+        #loginPopup.hidden { display: none; }
+        #loginPopup h2 { margin-bottom: 16px; font-size: 18px; }
+        #loginPopup input {
+            width: 100%; padding: 8px; margin-bottom: 12px;
+            background: #0a1929; border: 1px solid #3a6a9c; color: #fff; border-radius: 4px;
+        }
+        #loginPopup button {
+            width: 100%; padding: 10px; background: #2a5a8c; border: none;
+            color: #fff; cursor: pointer; border-radius: 4px; font-size: 14px;
+        }
+        #loginPopup button:hover { background: #3a6a9c; }
+
+        /* Settings icon (change name/pass) */
+        #settingsIcon {
+            position: fixed; top: 10px; right: 10px; z-index: 150;
+            background: rgba(26, 58, 92, 0.8); border: 1px solid #3a6a9c;
+            border-radius: 4px; padding: 6px 10px; cursor: pointer; color: #fff; font-size: 12px;
+        }
+        #settingsIcon:hover { background: #2a5a8c; }
+
+        /* Main menu container */
+        #menuContainer {
+            width: 80%; max-width: 1200px; height: 70%;
+            background: rgba(20, 40, 60, 0.9); border: 2px solid #3a6a9c; border-radius: 12px;
+            display: flex; flex-direction: column; padding: 20px;
+        }
+
+        /* Menu header with gamemode */
+        #menuHeader {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #3a6a9c;
+        }
+        #menuHeader h1 { color: #fff; font-size: 24px; }
+        #gamemodeSelect {
+            padding: 8px 16px; background: #1a3a5c; border: 1px solid #3a6a9c;
+            color: #fff; border-radius: 4px; font-size: 14px;
+        }
+
+        /* Teams grid */
+        #teamsGrid {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;
+            flex: 1; overflow-y: auto;
+        }
+
+        .teamColumn {
+            background: rgba(10, 25, 41, 0.6); border: 1px solid #2a4a6c;
+            border-radius: 8px; padding: 12px; display: flex; flex-direction: column;
+        }
+        .teamColumn.inactive { opacity: 0.4; }
+        .teamColumn.inactive .teamContent { display: none; }
+
+        .teamHeader {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 12px;
+        }
+        .teamName {
+            color: #fff; font-size: 16px; font-weight: bold;
+            background: transparent; border: none; border-bottom: 1px dashed #3a6a9c;
+            padding: 4px; width: 120px;
+        }
+        .teamName:focus { outline: none; border-bottom-color: #5a9acc; }
+
+        .factionsList { flex: 1; }
+        .factionRow {
+            display: flex; align-items: center; gap: 8px;
+            padding: 8px; margin-bottom: 8px;
+            background: rgba(42, 90, 140, 0.3); border-radius: 4px;
+        }
+        .factionColor {
+            width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+            border: 2px solid #fff;
+        }
+        .factionName { color: #fff; flex: 1; font-size: 14px; }
+        .factionType { color: #8ab; font-size: 12px; margin-left: 8px; }
+        .factionReady { color: #4f8; font-size: 12px; }
+        .factionNotReady { color: #f84; font-size: 12px; }
+        .removeBtn {
+            background: #833; border: none; color: #fff;
+            width: 20px; height: 20px; border-radius: 50%; cursor: pointer; font-size: 12px;
+        }
+
+        .addFactionBtn {
+            width: 100%; padding: 8px; margin-top: 8px;
+            background: transparent; border: 1px dashed #3a6a9c;
+            color: #5a9acc; cursor: pointer; border-radius: 4px; font-size: 24px;
+        }
+        .addFactionBtn:hover { background: rgba(42, 90, 140, 0.3); }
+
+        .activateTeamBtn {
+            width: 100%; height: 100%; min-height: 100px;
+            background: transparent; border: 2px dashed #3a6a9c;
+            color: #5a9acc; cursor: pointer; border-radius: 8px; font-size: 36px;
+        }
+        .activateTeamBtn:hover { background: rgba(42, 90, 140, 0.2); }
+
+        /* Add faction popup */
+        .addFactionPopup {
+            position: absolute; background: #1a3a5c; border: 1px solid #3a6a9c;
+            border-radius: 4px; padding: 8px; z-index: 10;
+        }
+        .addFactionPopup.hidden { display: none; }
+        .addFactionPopup button {
+            display: block; width: 100%; padding: 8px 16px; margin-bottom: 4px;
+            background: #2a5a8c; border: none; color: #fff; cursor: pointer; border-radius: 4px;
+        }
+        .addFactionPopup button:last-child { margin-bottom: 0; }
+        .addFactionPopup button:hover { background: #3a6a9c; }
+
+        /* Ready button */
+        #readyBtn {
+            margin-top: 16px; padding: 16px 32px;
+            background: #2a8a4c; border: none; color: #fff;
+            font-size: 18px; cursor: pointer; border-radius: 8px; align-self: center;
+        }
+        #readyBtn:hover { background: #3a9a5c; }
+        #readyBtn.notReady { background: #8a4a2c; }
+
+        /* Color picker (hidden native, we style our own) */
+        input[type="color"] {
+            opacity: 0; position: absolute; width: 0; height: 0;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="settingsIcon" onclick="showLoginPopup()">Change Name/ID</div>
+
+    <div id="loginPopup">
+        <h2>Enter Your Identity</h2>
+        <input type="text" id="playerNameInput" placeholder="Your Name">
+        <input type="password" id="playerIdInput" placeholder="Password/ID">
+        <button onclick="savePlayerIdentity()">Continue</button>
+    </div>
+
+    <div id="menuOverlay" class="hidden">
+        <div id="menuContainer">
+            <div id="menuHeader">
+                <h1>Naval Command</h1>
+                <select id="gamemodeSelect" onchange="onGamemodeChange()">
+                    <option value="supremacy">Supremacy</option>
+                </select>
+            </div>
+            <div id="teamsGrid"></div>
+            <button id="readyBtn" onclick="toggleReady()">Ready</button>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>
