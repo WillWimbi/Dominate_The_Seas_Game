@@ -1,143 +1,167 @@
 // === CONSTANTS ===
 
-//hitpoint type definitions - used as templates when creating actual hitpoints on ships
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to load: ${src}`));
+        img.src = src;
+    });
+}
+
+
+const images = {};
+
+async function loadAllImages() {
+    images.battleship = await loadImage('assets/battleship.png');
+    images.carrier = await loadImage('assets/carrier.png');
+    images.cruiser = await loadImage('assets/cruiser.png');
+    images.destroyer = await loadImage('assets/destroyer.png');
+    images.submarine = await loadImage('assets/submarine.png');
+}
+
+
+
+//hitpoint type definitions - 4 cannon calibers + AA + torpedo + hangar
 const HITPOINT_TYPES = {
-    mainCannon: {
-        range: 42000, //42km in meters
-        damage: 150, //placeholder, needs tuning based on KE calcs later
-        maxHealth: 700,
-        maxCooldown: 20, //seconds between shots
-        projectileSpeed: 820 //m/s
+    in18: { //18-inch battleship guns
+        range: 42000, damage: 200, maxHealth: 800,
+        maxCooldown: 25, projectileSpeed: 820
     },
-    secondaryCannon: {
-        range: 15000,
-        damage: 40,
-        maxHealth: 100,
-        maxCooldown: 4,
-        projectileSpeed: 790
+    in13: { //13-inch battlecruiser guns
+        range: 35000, damage: 140, maxHealth: 600,
+        maxCooldown: 18, projectileSpeed: 800
     },
-    AA: {
-        range: 6000,
-        damage: 8, //per stream burst
-        maxHealth: 60, //lower health, but harder to hit (2x distance multiplier in damage calc)
-        maxCooldown: 0.2,
-        projectileSpeed: 880
+    in9: { //9-inch heavy cruiser guns
+        range: 25000, damage: 80, maxHealth: 400,
+        maxCooldown: 12, projectileSpeed: 780
     },
-    hangarBay: { //for carriers, higher health than cannons
-        range: 0,
-        damage: 0,
-        maxHealth: 400,
-        maxCooldown: 0,
-        projectileSpeed: 0
+    in6: { //6-inch light cruiser / secondary guns
+        range: 15000, damage: 35, maxHealth: 150,
+        maxCooldown: 6, projectileSpeed: 760
+    },
+    AA: { //cluster of ~3-4 AA guns
+        range: 6000, damage: 8, maxHealth: 60,
+        maxCooldown: 0.2, projectileSpeed: 880
+    },
+    torpedoMount: { //torpedo launcher, fires sideways only
+        range: 12000, damage: 400, maxHealth: 100,
+        maxCooldown: 30, projectileSpeed: 25 //torpedos are slow
+    },
+    hangarBay: {
+        range: 0, damage: 0, maxHealth: 400,
+        maxCooldown: 0, projectileSpeed: 0
     }
 };
 
-//merged ship templates - beam/length in meters, speeds in m/s
+//ship templates - beam/length in meters, speeds in m/s
 const SHIP_TEMPLATES = {
     destroyer: {
-        beam: 12, length: 115,
-        maxSpeed: 18, //m/s, roughly 35 knots
-        acceleration: 2, //m/s^2
-        turnRate: 0.04, //radians/sec
+        beam: 12, length: 115, maxSpeed: 18, acceleration: 2, turnRate: 0.04,
         hitpoints: [
-            {name: 'mainCannon1', type: 'mainCannon', relPosXY: [0, -40]},
-            {name: 'mainCannon2', type: 'mainCannon', relPosXY: [0, 40]},
-            {name: 'AA1', type: 'AA', relPosXY: [5, 0]},
-            {name: 'AA2', type: 'AA', relPosXY: [-5, 0]}
+            {name: 'gun1', type: 'in6', relPosXY: [0, -45]},
+            {name: 'gun2', type: 'in6', relPosXY: [0, 0]},
+            {name: 'gun3', type: 'in6', relPosXY: [0, 40]},
+            {name: 'torpL1', type: 'torpedoMount', relPosXY: [-6, -15]},
+            {name: 'torpL2', type: 'torpedoMount', relPosXY: [-6, 15]},
+            {name: 'torpR1', type: 'torpedoMount', relPosXY: [6, -15]},
+            {name: 'torpR2', type: 'torpedoMount', relPosXY: [6, 15]},
+            {name: 'AA1', type: 'AA', relPosXY: [5, -25]},
+            {name: 'AA2', type: 'AA', relPosXY: [-5, -25]},
+            {name: 'AA3', type: 'AA', relPosXY: [0, 25]}
         ]
     },
     lightCruiser: {
-        beam: 20, length: 183,
-        maxSpeed: 16,
-        acceleration: 1.5,
-        turnRate: 0.035,
+        beam: 20, length: 183, maxSpeed: 16, acceleration: 1.5, turnRate: 0.035,
         hitpoints: [
-            {name: 'mainCannon1', type: 'mainCannon', relPosXY: [0, -70]},
-            {name: 'mainCannon2', type: 'mainCannon', relPosXY: [0, -30]},
-            {name: 'mainCannon3', type: 'mainCannon', relPosXY: [0, 50]},
-            {name: 'secondaryCannon1', type: 'secondaryCannon', relPosXY: [8, 10]},
-            {name: 'secondaryCannon2', type: 'secondaryCannon', relPosXY: [-8, 10]},
-            {name: 'AA1', type: 'AA', relPosXY: [8, -10]},
-            {name: 'AA2', type: 'AA', relPosXY: [-8, -10]}
+            {name: 'gun1', type: 'in6', relPosXY: [0, -75]},
+            {name: 'gun2', type: 'in6', relPosXY: [0, -45]},
+            {name: 'gun3', type: 'in6', relPosXY: [0, 20]},
+            {name: 'gun4', type: 'in6', relPosXY: [0, 50]},
+            {name: 'gun5', type: 'in6', relPosXY: [0, 75]},
+            {name: 'torpL', type: 'torpedoMount', relPosXY: [-9, 0]},
+            {name: 'torpR', type: 'torpedoMount', relPosXY: [9, 0]},
+            {name: 'AA1', type: 'AA', relPosXY: [8, -20]},
+            {name: 'AA2', type: 'AA', relPosXY: [-8, -20]},
+            {name: 'AA3', type: 'AA', relPosXY: [8, 30]},
+            {name: 'AA4', type: 'AA', relPosXY: [-8, 30]}
         ]
     },
     heavyCruiser: {
-        beam: 22, length: 204,
-        maxSpeed: 15,
-        acceleration: 1.2,
-        turnRate: 0.03,
+        beam: 22, length: 204, maxSpeed: 15, acceleration: 1.2, turnRate: 0.03,
         hitpoints: [
-            {name: 'mainCannon1', type: 'mainCannon', relPosXY: [0, -80]},
-            {name: 'mainCannon2', type: 'mainCannon', relPosXY: [0, -40]},
-            {name: 'mainCannon3', type: 'mainCannon', relPosXY: [0, 60]},
-            {name: 'secondaryCannon1', type: 'secondaryCannon', relPosXY: [10, 0]},
-            {name: 'secondaryCannon2', type: 'secondaryCannon', relPosXY: [-10, 0]},
-            {name: 'secondaryCannon3', type: 'secondaryCannon', relPosXY: [10, 30]},
-            {name: 'secondaryCannon4', type: 'secondaryCannon', relPosXY: [-10, 30]},
-            {name: 'AA1', type: 'AA', relPosXY: [9, -20]},
-            {name: 'AA2', type: 'AA', relPosXY: [-9, -20]},
-            {name: 'AA3', type: 'AA', relPosXY: [9, 20]},
-            {name: 'AA4', type: 'AA', relPosXY: [-9, 20]}
+            {name: 'main1', type: 'in9', relPosXY: [0, -85]},
+            {name: 'main2', type: 'in9', relPosXY: [0, -45]},
+            {name: 'main3', type: 'in9', relPosXY: [0, 70]},
+            {name: 'sec1', type: 'in6', relPosXY: [10, -20]},
+            {name: 'sec2', type: 'in6', relPosXY: [-10, -20]},
+            {name: 'sec3', type: 'in6', relPosXY: [10, 10]},
+            {name: 'sec4', type: 'in6', relPosXY: [-10, 10]},
+            {name: 'sec5', type: 'in6', relPosXY: [10, 40]},
+            {name: 'sec6', type: 'in6', relPosXY: [-10, 40]},
+            {name: 'torpL', type: 'torpedoMount', relPosXY: [-10, 25]},
+            {name: 'torpR', type: 'torpedoMount', relPosXY: [10, 25]},
+            {name: 'AA1', type: 'AA', relPosXY: [9, -35]},
+            {name: 'AA2', type: 'AA', relPosXY: [-9, -35]},
+            {name: 'AA3', type: 'AA', relPosXY: [9, 55]},
+            {name: 'AA4', type: 'AA', relPosXY: [-9, 55]}
         ]
     },
     battlecruiser: {
-        beam: 30, length: 231,
-        maxSpeed: 14,
-        acceleration: 1.0,
-        turnRate: 0.025,
+        beam: 30, length: 231, maxSpeed: 14, acceleration: 1.0, turnRate: 0.025,
         hitpoints: [
-            {name: 'mainCannon1', type: 'mainCannon', relPosXY: [0, -90]},
-            {name: 'mainCannon2', type: 'mainCannon', relPosXY: [0, -50]},
-            {name: 'mainCannon3', type: 'mainCannon', relPosXY: [0, 50]},
-            {name: 'mainCannon4', type: 'mainCannon', relPosXY: [0, 80]},
-            {name: 'secondaryCannon1', type: 'secondaryCannon', relPosXY: [12, -20]},
-            {name: 'secondaryCannon2', type: 'secondaryCannon', relPosXY: [-12, -20]},
-            {name: 'secondaryCannon3', type: 'secondaryCannon', relPosXY: [12, 20]},
-            {name: 'secondaryCannon4', type: 'secondaryCannon', relPosXY: [-12, 20]},
-            {name: 'AA1', type: 'AA', relPosXY: [12, -40]},
-            {name: 'AA2', type: 'AA', relPosXY: [-12, -40]},
-            {name: 'AA3', type: 'AA', relPosXY: [12, 40]},
-            {name: 'AA4', type: 'AA', relPosXY: [-12, 40]}
+            {name: 'main1', type: 'in13', relPosXY: [0, -95]},
+            {name: 'main2', type: 'in13', relPosXY: [0, -55]},
+            {name: 'main3', type: 'in13', relPosXY: [0, 80]},
+            {name: 'sec1', type: 'in6', relPosXY: [12, -25]},
+            {name: 'sec2', type: 'in6', relPosXY: [-12, -25]},
+            {name: 'sec3', type: 'in6', relPosXY: [12, 15]},
+            {name: 'sec4', type: 'in6', relPosXY: [-12, 15]},
+            {name: 'sec5', type: 'in6', relPosXY: [12, 50]},
+            {name: 'sec6', type: 'in6', relPosXY: [-12, 50]},
+            {name: 'AA1', type: 'AA', relPosXY: [0, -75]}, //front
+            {name: 'AA2', type: 'AA', relPosXY: [12, -40]},
+            {name: 'AA3', type: 'AA', relPosXY: [-12, -40]},
+            {name: 'AA4', type: 'AA', relPosXY: [12, 35]},
+            {name: 'AA5', type: 'AA', relPosXY: [-12, 35]},
+            {name: 'AA6', type: 'AA', relPosXY: [0, 95]} //rear
         ]
     },
     battleship: {
-        beam: 36, length: 267,
-        maxSpeed: 12,
-        acceleration: 0.8,
-        turnRate: 0.02,
+        beam: 36, length: 267, maxSpeed: 12, acceleration: 0.8, turnRate: 0.02,
         hitpoints: [
-            {name: 'mainCannon1', type: 'mainCannon', relPosXY: [0, -100]},
-            {name: 'mainCannon2', type: 'mainCannon', relPosXY: [0, -60]},
-            {name: 'mainCannon3', type: 'mainCannon', relPosXY: [0, 60]},
-            {name: 'mainCannon4', type: 'mainCannon', relPosXY: [0, 90]},
-            {name: 'secondaryCannon1', type: 'secondaryCannon', relPosXY: [15, -30]},
-            {name: 'secondaryCannon2', type: 'secondaryCannon', relPosXY: [-15, -30]},
-            {name: 'secondaryCannon3', type: 'secondaryCannon', relPosXY: [15, 0]},
-            {name: 'secondaryCannon4', type: 'secondaryCannon', relPosXY: [-15, 0]},
-            {name: 'secondaryCannon5', type: 'secondaryCannon', relPosXY: [15, 30]},
-            {name: 'secondaryCannon6', type: 'secondaryCannon', relPosXY: [-15, 30]},
-            {name: 'AA1', type: 'AA', relPosXY: [14, -50]},
-            {name: 'AA2', type: 'AA', relPosXY: [-14, -50]},
-            {name: 'AA3', type: 'AA', relPosXY: [14, -20]},
-            {name: 'AA4', type: 'AA', relPosXY: [-14, -20]},
-            {name: 'AA5', type: 'AA', relPosXY: [14, 20]},
-            {name: 'AA6', type: 'AA', relPosXY: [-14, 20]}
+            {name: 'main1', type: 'in18', relPosXY: [0, -110]},
+            {name: 'main2', type: 'in18', relPosXY: [0, -65]},
+            {name: 'main3', type: 'in18', relPosXY: [0, 90]},
+            {name: 'sec1', type: 'in6', relPosXY: [15, -35]},
+            {name: 'sec2', type: 'in6', relPosXY: [-15, -35]},
+            {name: 'sec3', type: 'in6', relPosXY: [15, 0]},
+            {name: 'sec4', type: 'in6', relPosXY: [-15, 0]},
+            {name: 'sec5', type: 'in6', relPosXY: [15, 40]},
+            {name: 'sec6', type: 'in6', relPosXY: [-15, 40]},
+            {name: 'AA1', type: 'AA', relPosXY: [0, -90]}, //front
+            {name: 'AA2', type: 'AA', relPosXY: [14, -50]},
+            {name: 'AA3', type: 'AA', relPosXY: [-14, -50]},
+            {name: 'AA4', type: 'AA', relPosXY: [14, -15]},
+            {name: 'AA5', type: 'AA', relPosXY: [-14, -15]},
+            {name: 'AA6', type: 'AA', relPosXY: [14, 25]},
+            {name: 'AA7', type: 'AA', relPosXY: [-14, 25]},
+            {name: 'AA8', type: 'AA', relPosXY: [0, 115]} //rear
         ]
     },
     carrier: {
-        beam: 45, length: 266, //flight deck width counted as beam for simplicity
-        maxSpeed: 13,
-        acceleration: 0.9,
-        turnRate: 0.022,
+        beam: 45, length: 266, maxSpeed: 13, acceleration: 0.9, turnRate: 0.022,
         hitpoints: [
-            {name: 'hangarBay1', type: 'hangarBay', relPosXY: [0, -40]},
-            {name: 'hangarBay2', type: 'hangarBay', relPosXY: [0, 40]},
-            {name: 'AA1', type: 'AA', relPosXY: [18, -80]},
-            {name: 'AA2', type: 'AA', relPosXY: [-18, -80]},
-            {name: 'AA3', type: 'AA', relPosXY: [18, 0]},
-            {name: 'AA4', type: 'AA', relPosXY: [-18, 0]},
-            {name: 'AA5', type: 'AA', relPosXY: [18, 80]},
-            {name: 'AA6', type: 'AA', relPosXY: [-18, 80]}
+            {name: 'hangar1', type: 'hangarBay', relPosXY: [0, -40]},
+            {name: 'hangar2', type: 'hangarBay', relPosXY: [0, 40]},
+            {name: 'AA1', type: 'AA', relPosXY: [18, -100]},
+            {name: 'AA2', type: 'AA', relPosXY: [-18, -100]},
+            {name: 'AA3', type: 'AA', relPosXY: [18, -40]},
+            {name: 'AA4', type: 'AA', relPosXY: [-18, -40]},
+            {name: 'AA5', type: 'AA', relPosXY: [18, 20]},
+            {name: 'AA6', type: 'AA', relPosXY: [-18, 20]},
+            {name: 'AA7', type: 'AA', relPosXY: [18, 80]},
+            {name: 'AA8', type: 'AA', relPosXY: [-18, 80]}
         ]
     }
 };
@@ -150,10 +174,13 @@ const AIRCRAFT_TEMPLATES = {
 };
 
 //targeting priority - lower number = higher priority, 10 = can't target this type
+//big guns prefer big targets, small guns prefer small targets
 const PRIORITY = {
-    mainCannon: {battleship: 1, carrier: 2, battlecruiser: 3, heavyCruiser: 4, lightCruiser: 5, destroyer: 6},
-    secondaryCannon: {heavyCruiser: 1, lightCruiser: 2, destroyer: 3, battlecruiser: 4, battleship: 5, carrier: 6}
-    //AA uses distance-based priority, not this matrix
+    in18: {battleship: 1, carrier: 2, battlecruiser: 3, heavyCruiser: 4, lightCruiser: 5, destroyer: 6},
+    in13: {battlecruiser: 1, carrier: 2, battleship: 3, heavyCruiser: 4, lightCruiser: 5, destroyer: 6},
+    in9:  {heavyCruiser: 1, battlecruiser: 2, lightCruiser: 3, carrier: 4, battleship: 5, destroyer: 6},
+    in6:  {lightCruiser: 1, destroyer: 2, heavyCruiser: 3, battlecruiser: 4, carrier: 5, battleship: 6}
+    //AA = distance-based (aircraft only), torpedoMount = no auto-targeting yet
 };
 
 //gamemode definitions
@@ -544,7 +571,7 @@ function checkAllReady() {
     }
 
     if (allReady && hasFactions) {
-        startGame();
+        startGameWithGameMode();
     }
 }
 
@@ -553,11 +580,68 @@ function onGamemodeChange() {
     setAllPlayersNotReady();
 }
 
-// === AGENT CREATION ===
+class Agent{
+    constructor(teamId, position, orientation, templateName){
+        this.id = randomId();
+        this.team = teamId;
+        this.position = [...position];
+        this.orientation = normalize([...orientation]);
+        this.templateName = templateName;
+        this.currentSpeed = 0;
+        this.targetPosition = null;
+        this.targetMode = 'auto'; //'auto', 'agent', 'hitpoint'
+        this.lockedTarget = null;
+        this.lockedHitpoint = null;
+        this.hitpoints = {};
+        this.health = 0;
+        this.maxHealth = 0;
+    }
+}
 
+class Ship extends Agent{
+    constructor(teamId, factionId, shipType, positionXY, orientationDir, tHealth){
+        this.id = randomId();
+        this.team = teamId;
+        this.faction = factionId;
+        this.shipType = shipType;
+        this.positionXY = [...positionXY];
+        this.orientationDir = normalize(orientationDir); //always normalized unit vector, but unnecessary atm.
+        this.currentSpeed = 0;
+        this.targetPositionXY = null;
+        this.targetMode = 'auto'; //'auto', 'agent', 'hitpoint'
+        this.lockedTarget = null;
+        this.lockedHitpoint = null;
+        this.hitpoints = hitpoints;
+        this.health = tHealth;
+        this.maxHealth = tHealth
+    }
+}
+
+class Aircraft extends Agent{
+    constructor(teamId, factionId, aircraftType, positionXYZ, orientationDir, tHealth){
+        this.id = randomId();
+        this.team = teamId;
+        this.faction = factionId;
+        this.aircraftType = aircraftType;
+        this.positionXY = [...positionXYZ];
+        this.orientationDir = normalize(orientationDir); //always normalized unit vector, but unnecessary atm.
+        this.currentSpeed = 0;
+        this.targetPositionXY = null;
+        this.targetMode = 'auto'; //'auto', 'agent', 'hitpoint'
+        this.lockedTarget = null;
+        this.lockedHitpoint = null;
+        this.hitpoints = null;
+        this.health = tHealth;
+        this.maxHealth = tHealth;
+    }
+}
+
+//bases are just collections of hitpoints on land.
+
+// === AGENT CREATION ===
+//checks out for efficiency.
 function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
     let template = SHIP_TEMPLATES[shipType];
-    if (!template) return null;
 
     //initialize hitpoints from template
     let hitpoints = {};
@@ -566,7 +650,7 @@ function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
         let hpType = HITPOINT_TYPES[hpDef.type];
         hitpoints[hpDef.name] = {
             type: hpDef.type,
-            relPosXY: [...hpDef.relPosXY],
+            relPosXY: [...hpDef.relPosXY], //... deepcopies the array by iterating out its elements (but if hpDef.relPosXY was made of subarrays, then this will merely put pointers to those sub arraysin this array.)
             health: hpType.maxHealth,
             maxHealth: hpType.maxHealth,
             cooldown: 0,
@@ -575,25 +659,26 @@ function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
         totalHealth += hpType.maxHealth;
     }
 
-    return {
-        id: randomId(),
-        team: parseInt(teamId),
-        faction: factionId,
-        shipType: shipType,
-        positionXY: [...positionXY],
-        orientationDir: normalize(orientationDir), //always normalized unit vector
-        currentSpeed: 0,
-        targetPositionXY: null,
-        targetMode: 'auto', //'auto', 'agent', 'hitpoint'
-        lockedTarget: null,
-        lockedHitpoint: null,
-        hitpoints: hitpoints,
-        health: totalHealth,
-        maxHealth: totalHealth
-    };
+    return new Ship(teamId, factionId, shipType, positionXY, orientationDir, totalHealth);
 }
 
-function spawnSupremacyFleet(teamId, factionId, centerXY, facingDir) {
+//orientationDir should usually just be the same as, say, the aircraft carrier's facing direction, or the base's airstrip facing direction.
+function createAircraft(teamId, factionId, aircraftType, positionXYZ, orientationDir) {
+    let template = AIRCRAFT_TEMPLATES[aircraftType];
+    return new Aircraft(teamId, factionId, aircraftType, positionXYZ, orientationDir, template.maxHealth);
+}
+
+function spawnGameModeAgents(){
+
+    switch (game.currentGamemode) {
+        case 'supremacy':
+            return spawnGameModeSupremacyFleet(teamId, factionId, centerXY, facingDir);
+        default:
+            return [];
+    }
+}
+
+function spawnGameModeSupremacyFleet(teamId, factionId, centerXY, facingDir) {
     let ships = GAMEMODES.supremacy.spawnShips;
     let spacing = 400; //meters between ships
     let agents = [];
@@ -615,9 +700,93 @@ function spawnSupremacyFleet(teamId, factionId, centerXY, facingDir) {
     return agents;
 }
 
+
+
+function spawnSupremacyAircraft(){
+
+    let aircrafts = [];
+    for (let i = 0; i < 2; i++) {
+        let aircraft = createAircraft(teamId, factionId, 'fighterSquadron', posXYZ, facingDir);
+        aircrafts.push(aircraft);
+    }
+    return aircrafts;
+}
+
+//where formation is of the type:
+//{ships: {shipType: {position}}}
+//{aircraft: {aircraftType: {position}}}
+//{bases: {baseType: {position}}}
+//these can repeated since we don't care about individual duplicates since they are well duplicates, so we can just run it for each.
+//
+
+//keep in mind game coordinates have 0,0 at top left, so up on map is negative y, down on map is positive y. left on map is negative x, right on map is positive x.
+//formationExmp = {shipFormation: {carrier: {position: [0, 0]}, battleship: {position: [-500, -80]}, battlecruiser: {position: [500,-80]}, heavycruiser: {position: [-500,-580]}, heavycruiser: {position: [500, -580]}, lightcruiser: {position: [-500,-1080]},lightcruiser: {position: [500,-1080]}, destroyer: {position: [-500, 420]},lightcruiser: {position: [500,420]}, destroyer: {position: [0,-1080]}}, 
+///aircraftFormation: {fighterSquadron: {position: [0, 100]}},
+
+//}
+
+//tests --> check if it works for all possible game configurations (e.g 2 teams with 1 faction each, 2 teams with 2 factions each, 3 teams with 1 or 2 each or some mix, 4 teams with 1 faction each, 4 w/ 2 factions each, etc.)
+
+
+
+
+const formationSupremacyStarter = {
+    formationOrientation: [0, -1],
+    shipFormation: [
+        { type: "carrier", position: [0, 0], orientation: [0, -1] },
+        { type: "battleship", position: [-500, -80], orientation: [0, -1] },
+        { type: "battlecruiser", position: [500, -80], orientation: [0, -1] },
+        { type: "heavycruiser", position: [-500, -580], orientation: [0, -1] },
+        { type: "heavycruiser", position: [500, -580], orientation: [0, -1] },
+        { type: "lightcruiser", position: [-500, -1080], orientation: [0, -1] },
+        { type: "lightcruiser", position: [500, -1080], orientation: [0, -1] },
+        { type: "destroyer", position: [-500, 420], orientation: [0, -1] },
+        { type: "lightcruiser", position: [500, 420], orientation: [0, -1] },
+        { type: "destroyer", position: [0, -1080], orientation: [0, -1] }
+    ],
+    aircraftFormation: [
+        { type: "fighterSquadron", position: [0, 100], orientation: [0, -1] }
+    ]
+};
+
+const positionsOfFormationsSupremacy = {
+    {factions: 8, positionsOfMainFleets: [21000,15000],[29000,15000]],[[21000,35000],[29000,35000]],[[15000,21000],[15000,29000]],[[35000,21000],[35000,29000]],[[21000,35000],[29000,35000]],[[21000,15000],[29000,15000]],[[15000,21000],[15000,29000]],[[35000,21000],[35000,29000]]]} //on map, 21km to right, 15km to top, 29km to right, 15km to bottom, 21km to left, 15km to top, 29km to left, 15km to bottom
+    {factions: 4, positionsOfMainFleets: [25000,15000],[25000,35000],[15000,25000],[35000,25000]]} 
+}//we'll make their orientations respectively too. So like for 21000,15000 & 29000,15000 OR 25000,15000its orientation should be 0,1 because 1 is down.
+//for, say, 21000,35000 or 25000,35000 or 29000,35000, its orientation should be 1,0, since its to the right which is positive x in the cooordinates. Remember the map is 50km x 50km
+
+//,baseFormations: {} added later possibly.
+
+
+//baseFormations: {} added later 
+function spawnFormation(formations){
+    for (let formation of formations){  
+    if(formation.shipFormation){
+            for (let ship in formation.shipFormation){
+                createShip(ship.teamId, ship.factionId, ship.type, ship.position, ship.orientation);
+            }
+        }
+        if(formation.aircraftFormation){
+            for (let aircraft in formation.aircraftFormation){
+                createAircraft(aircraft.position);
+            }
+        }
+        if(formation.baseFormations){
+            for (let base in formation.baseFormations){
+                createBase(base.position);
+            }
+        }
+    }
+}
+
+//we're going to have a big fleet spawner function that initiates all agents given formations we pass to it.
+//we will make a list of certain const = {};// formations will use these by default. 
+
+
+
 // === GAME START ===
 
-function startGame() {
+function startGameWithGameMode() {
     game.phase = 'playing';
     hideMenu();
 
@@ -658,7 +827,7 @@ function startGame() {
                 pos.center[1] + perpDir[1] * factionOffset
             ];
 
-            let ships = spawnSupremacyFleet(teamId, factionId, factionCenter, pos.facing);
+            let ships = spawnGameModeSupremacyFleet(teamId, factionId, factionCenter, pos.facing);
             game.activeAgents[teamId][factionId].ships = ships;
             factionOffsetIdx++;
         }
@@ -1219,13 +1388,19 @@ function renderShipHitpoints(ship, showHealthBars) {
         //color by type
         let baseColor;
         if (hp.destroyed) {
-            baseColor = '#333'; //destroyed = dark grey
-        } else if (hp.type === 'mainCannon') {
+            baseColor = '#333';
+        } else if (hp.type === 'in18') {
+            baseColor = '#ff3300'; //big guns = red-orange
+        } else if (hp.type === 'in13') {
             baseColor = '#ff6600';
-        } else if (hp.type === 'secondaryCannon') {
-            baseColor = '#ffaa00';
+        } else if (hp.type === 'in9') {
+            baseColor = '#ff9900';
+        } else if (hp.type === 'in6') {
+            baseColor = '#ffcc00';
         } else if (hp.type === 'AA') {
             baseColor = '#00aaff';
+        } else if (hp.type === 'torpedoMount') {
+            baseColor = '#00ff88';
         } else if (hp.type === 'hangarBay') {
             baseColor = '#aa00ff';
         } else {
