@@ -1,23 +1,150 @@
 // === CONSTANTS ===
 
-function loadImage(src) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error(`Failed to load: ${src}`));
+const images = {};
+async function loadAllImages() {
+    const load = src => new Promise((res, rej) => {
+        let img = new Image();
+        img.onload = () => res(img);
+        img.onerror = () => rej(src);
         img.src = src;
     });
+    images.fighter = await load('assets/fighterPlane.png');
+    images.bomber = await load('assets/bomberPlane.png');
+    images.torpedo = await load('assets/torpedoPlane.png');
 }
 
+//turret radii for visual rendering (screen pixels at zoom=1)
+const TURRET_RADII = {in18: 8, in13: 7, in9: 6, in6: 5, torpedoMount: 4, hangarBay: 0};
 
-const images = {};
+//superstructure configs per ship type {y: center offset, w: width, h: height}
+const SUPERSTRUCTURES = {
+    destroyer: [{y: -10, w: 6, h: 15}],
+    lightCruiser: [{y: -30, w: 8, h: 20}, {y: 10, w: 6, h: 12}],
+    heavyCruiser: [{y: -30, w: 10, h: 25}, {y: 15, w: 8, h: 18}],
+    battlecruiser: [{y: -35, w: 12, h: 30}, {y: 20, w: 10, h: 22}],
+    battleship: [{y: -40, w: 14, h: 35}, {y: 25, w: 12, h: 28}, {y: 60, w: 8, h: 15}],
+    carrier: [{y: -80, w: 10, h: 20}] //bridge only, positioned on side
+};
 
-async function loadAllImages() {
-    images.battleship = await loadImage('assets/battleship.png');
-    images.carrier = await loadImage('assets/carrier.png');
-    images.cruiser = await loadImage('assets/cruiser.png');
-    images.destroyer = await loadImage('assets/destroyer.png');
-    images.submarine = await loadImage('assets/submarine.png');
+//sun direction for shadows (normalized, pointing toward light source)
+const SUN_DIR = [0.53, -0.85]; //pre-normalized
+
+// === AUDIO SYSTEM ===
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+//sound definitions
+const SOUND_DEFS = {
+    cannonIn18: {freq: 60, dur: 0.6, type: 'cannon', vol: 1.0},
+    cannonIn13: {freq: 80, dur: 0.5, type: 'cannon', vol: 0.85},
+    cannonIn9: {freq: 100, dur: 0.4, type: 'cannon', vol: 0.7},
+    cannonIn6: {freq: 140, dur: 0.3, type: 'cannon', vol: 0.5},
+    AA: {freq: 800, dur: 0.08, type: 'aa', vol: 0.25},
+    hit: {freq: 120, dur: 0.3, type: 'cannon', vol: 0.7},
+    splash: {freq: 400, dur: 0.4, type: 'splash', vol: 0.25},
+    select: {freq: 800, dur: 0.08, type: 'click', vol: 0.1}
+};
+
+function playSound(soundName, worldXY) {
+    let def = SOUND_DEFS[soundName];
+    if (!def) return;
+    let d = Math.hypot(worldXY[0] - camera.x, worldXY[1] - camera.y);
+    let falloff = 1 / (1 + (d / 8000) ** 2);
+    let vol = def.vol * falloff * 0.25;
+    if (vol < 0.005) return;
+
+    let t = audioCtx.currentTime;
+
+    if (def.type === 'cannon') {
+        //deep boom using noise + low freq oscillator
+        let bufferSize = audioCtx.sampleRate * def.dur;
+        let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        let data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            let env = Math.exp(-i / (bufferSize * 0.15));
+            data[i] = (Math.random() * 2 - 1) * env;
+        }
+        let noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        let filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = def.freq * 2;
+        let gain = audioCtx.createGain();
+        gain.gain.value = vol;
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(audioCtx.destination);
+        noise.start(t);
+    } else if (def.type === 'aa') {
+        //sharp crack
+        let bufferSize = audioCtx.sampleRate * def.dur;
+        let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        let data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            let env = Math.exp(-i / (bufferSize * 0.3));
+            data[i] = (Math.random() * 2 - 1) * env;
+        }
+        let noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        let filter = audioCtx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.value = 600;
+        let gain = audioCtx.createGain();
+        gain.gain.value = vol;
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(audioCtx.destination);
+        noise.start(t);
+    } else if (def.type === 'splash') {
+        let bufferSize = audioCtx.sampleRate * def.dur;
+        let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        let data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            let env = Math.sin(Math.PI * i / bufferSize);
+            data[i] = (Math.random() * 2 - 1) * env;
+        }
+        let noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+        let filter = audioCtx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = 500;
+        filter.Q.value = 0.5;
+        let gain = audioCtx.createGain();
+        gain.gain.value = vol;
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(audioCtx.destination);
+        noise.start(t);
+    } else if (def.type === 'click') {
+        let osc = audioCtx.createOscillator();
+        let gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = def.freq;
+        gain.gain.setValueAtTime(vol, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + def.dur);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(t);
+        osc.stop(t + def.dur);
+    }
+}
+
+//sea ambience (continuous low rumble)
+let seaAmbience = null;
+function startSeaAmbience() {
+    if (seaAmbience) return;
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    let filter = audioCtx.createBiquadFilter();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 30;
+    filter.type = 'lowpass';
+    filter.frequency.value = 100;
+    gain.gain.value = 0.03;
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    seaAmbience = {osc, gain};
 }
 
 
@@ -151,6 +278,11 @@ const SHIP_TEMPLATES = {
     },
     carrier: {
         beam: 45, length: 266, maxSpeed: 13, acceleration: 0.9, turnRate: 0.022,
+        //carrier has squadron storage - defined here as default loadout
+        squadrons: [
+            {type: 'fighterSquadron', count: 6}, //6 fighter squadrons (12 planes each)
+            {type: 'torpedoSquadron', count: 3}  //3 torpedo squadrons (5 planes each)
+        ],
         hitpoints: [
             {name: 'hangar1', type: 'hangarBay', relPosXY: [0, -40]},
             {name: 'hangar2', type: 'hangarBay', relPosXY: [0, 40]},
@@ -166,11 +298,24 @@ const SHIP_TEMPLATES = {
     }
 };
 
-//aircraft templates - null for now until carriers spawn them
+//aircraft templates - V formation settings: stepX = horizontal spacing, stepY = vertical offset
 const AIRCRAFT_TEMPLATES = {
-    fighterSquadron: {maxHealth: 24, maxSpeed: 150, turnRate: 0.3, squadSize: 12, healthPerUnit: 2},
-    torpedoSquadron: {maxHealth: 10, maxSpeed: 120, turnRate: 0.2, squadSize: 5, healthPerUnit: 2},
-    heavyBomberSquadron: {maxHealth: 50, maxSpeed: 90, turnRate: 0.1, squadSize: 5, healthPerUnit: 10}
+    fighterSquadron: {
+        maxHealth: 24, maxSpeed: 150, turnRate: 0.3, squadSize: 12, healthPerUnit: 2,
+        dogfightDPS: 3, bombDamage: 20, bombCapacity: 2, image: 'fighter',
+        formationStepX: 20, formationStepY: 6, //shallow V formation
+        defaultArmed: false //fighters unarmed by default, can equip bombs
+    },
+    torpedoSquadron: {
+        maxHealth: 10, maxSpeed: 120, turnRate: 0.2, squadSize: 5, healthPerUnit: 2,
+        dogfightDPS: 0.5, torpedoDamage: 300, torpedoCapacity: 1, image: 'torpedo',
+        formationStepX: 25, formationStepY: 8, defaultArmed: true
+    },
+    heavyBomberSquadron: {
+        maxHealth: 50, maxSpeed: 90, turnRate: 0.1, squadSize: 5, healthPerUnit: 10,
+        dogfightDPS: 0.3, bombDamage: 150, bombCapacity: 6, image: 'bomber',
+        formationStepX: 30, formationStepY: 10, defaultArmed: true
+    }
 };
 
 //targeting priority - lower number = higher priority, 10 = can't target this type
@@ -228,6 +373,7 @@ let localPlayer = {
 let camera = {
     x: 0, y: 0, //world center position
     zoom: 1, //world meters per pixel (higher = more zoomed out)
+    rotation: 0, //view rotation in radians
     minZoom: 0.1,
     maxZoom: 50 //50km visible at 1080p roughly
 };
@@ -240,8 +386,11 @@ let input = {
     mouseScreenXY: [0, 0],
     mouseWorldXY: [0, 0],
     shiftHeld: false,
-    hoveredShip: null, //ship currently under mouse cursor
-    hoveredHitpoint: null //hitpoint currently under mouse (if any)
+    hoveredShip: null,
+    hoveredHitpoint: null,
+    //middle mouse pan/rotate
+    middleDragging: false,
+    middleStartXY: null
 };
 
 // === CANVAS SETUP ===
@@ -284,17 +433,25 @@ function randomAiName() {
 // === COORDINATE TRANSFORMS ===
 
 function screenToWorld(sx, sy) {
-    return [
-        (sx - canvas.width/2) * camera.zoom + camera.x,
-        (sy - canvas.height/2) * camera.zoom + camera.y
-    ];
+    //translate from screen center
+    let dx = (sx - canvas.width/2) * camera.zoom;
+    let dy = (sy - canvas.height/2) * camera.zoom;
+    //unrotate (negative angle)
+    let cos = Math.cos(-camera.rotation), sin = Math.sin(-camera.rotation);
+    let rx = dx * cos - dy * sin;
+    let ry = dx * sin + dy * cos;
+    return [rx + camera.x, ry + camera.y];
 }
 
 function worldToScreen(wx, wy) {
-    return [
-        (wx - camera.x) / camera.zoom + canvas.width/2,
-        (wy - camera.y) / camera.zoom + canvas.height/2
-    ];
+    //translate relative to camera
+    let dx = wx - camera.x, dy = wy - camera.y;
+    //rotate
+    let cos = Math.cos(camera.rotation), sin = Math.sin(camera.rotation);
+    let rx = dx * cos - dy * sin;
+    let ry = dx * sin + dy * cos;
+    //scale and translate to screen center
+    return [rx / camera.zoom + canvas.width/2, ry / camera.zoom + canvas.height/2];
 }
 
 // === PLAYER IDENTITY (localStorage) ===
@@ -599,49 +756,76 @@ class Agent{
 }
 
 class Ship extends Agent{
-    constructor(teamId, factionId, shipType, positionXY, orientationDir, tHealth){
-        this.id = randomId();
-        this.team = teamId;
+    constructor(teamId, factionId, shipType, positionXY, orientationDir, hitpoints, totalHealth){
+        super(teamId, positionXY, orientationDir, shipType);
         this.faction = factionId;
         this.shipType = shipType;
         this.positionXY = [...positionXY];
-        this.orientationDir = normalize(orientationDir); //always normalized unit vector, but unnecessary atm.
+        this.orientationDir = normalize(orientationDir);
         this.currentSpeed = 0;
         this.targetPositionXY = null;
         this.targetMode = 'auto'; //'auto', 'agent', 'hitpoint'
         this.lockedTarget = null;
         this.lockedHitpoint = null;
         this.hitpoints = hitpoints;
-        this.health = tHealth;
-        this.maxHealth = tHealth
+        this.health = totalHealth;
+        this.maxHealth = totalHealth;
+        //ordnance tracking - count torpedoes per torpedo mount
+        this.torpedoCount = this.countTorpedoMounts() * 4; //4 torpedoes per mount
+        //carrier squadron storage
+        if (shipType === 'carrier') {
+            let tpl = SHIP_TEMPLATES.carrier;
+            this.storedSquadrons = tpl.squadrons.map(s => ({type: s.type, count: s.count}));
+            this.launchingSquadron = null; //squadron currently launching
+            this.launchProgress = 0;
+        }
+    }
+    countTorpedoMounts() {
+        let count = 0;
+        for (let name in this.hitpoints) {
+            if (this.hitpoints[name].type === 'torpedoMount' && !this.hitpoints[name].destroyed) count++;
+        }
+        return count;
     }
 }
 
 class Aircraft extends Agent{
-    constructor(teamId, factionId, aircraftType, positionXYZ, orientationDir, tHealth){
-        this.id = randomId();
-        this.team = teamId;
+    constructor(teamId, factionId, aircraftType, positionXYZ, orientationDir, totalHealth, homeCarrier){
+        super(teamId, positionXYZ, orientationDir, aircraftType);
         this.faction = factionId;
         this.aircraftType = aircraftType;
-        this.positionXY = [...positionXYZ];
-        this.orientationDir = normalize(orientationDir); //always normalized unit vector, but unnecessary atm.
-        this.currentSpeed = 0;
+        this.positionXYZ = [...positionXYZ];
+        this.positionXY = [positionXYZ[0], positionXYZ[1]];
+        this.orientationDir = normalize(orientationDir);
+        this.currentSpeed = AIRCRAFT_TEMPLATES[aircraftType].maxSpeed * 0.8;
         this.targetPositionXY = null;
-        this.targetMode = 'auto'; //'auto', 'agent', 'hitpoint'
-        this.lockedTarget = null;
-        this.lockedHitpoint = null;
-        this.hitpoints = null;
-        this.health = tHealth;
-        this.maxHealth = tHealth;
+        this.health = totalHealth;
+        this.maxHealth = totalHealth;
+        //squadron state
+        let t = AIRCRAFT_TEMPLATES[aircraftType];
+        this.state = 'idle'; //'idle','moving','dogfight','bombing','returning','launching'
+        this.flightTime = 0;
+        this.armed = t.defaultArmed; //fighters default unarmed
+        this.bombs = this.armed ? (t.bombCapacity || 0) : 0;
+        this.torpedoes = t.torpedoCapacity || 0;
+        this.dogfightTarget = null;
+        this.bombTarget = null;
+        this.homeCarrier = homeCarrier || null;
+        this.unitsAlive = t.squadSize;
+        this.launchProgress = 0; //for takeoff animation
+    }
+    get fatigueMultiplier() {
+        return this.flightTime < 60 ? 1 : Math.max(0.5, 1 - (this.flightTime - 60) * 0.0005);
     }
 }
 
 //bases are just collections of hitpoints on land.
 
 // === AGENT CREATION ===
-//checks out for efficiency.
+
 function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
     let template = SHIP_TEMPLATES[shipType];
+    if (!template) return null;
 
     //initialize hitpoints from template
     let hitpoints = {};
@@ -650,7 +834,7 @@ function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
         let hpType = HITPOINT_TYPES[hpDef.type];
         hitpoints[hpDef.name] = {
             type: hpDef.type,
-            relPosXY: [...hpDef.relPosXY], //... deepcopies the array by iterating out its elements (but if hpDef.relPosXY was made of subarrays, then this will merely put pointers to those sub arraysin this array.)
+            relPosXY: [...hpDef.relPosXY],
             health: hpType.maxHealth,
             maxHealth: hpType.maxHealth,
             cooldown: 0,
@@ -659,7 +843,7 @@ function createShip(teamId, factionId, shipType, positionXY, orientationDir) {
         totalHealth += hpType.maxHealth;
     }
 
-    return new Ship(teamId, factionId, shipType, positionXY, orientationDir, totalHealth);
+    return new Ship(teamId, factionId, shipType, positionXY, orientationDir, hitpoints, totalHealth);
 }
 
 //orientationDir should usually just be the same as, say, the aircraft carrier's facing direction, or the base's airstrip facing direction.
@@ -668,119 +852,105 @@ function createAircraft(teamId, factionId, aircraftType, positionXYZ, orientatio
     return new Aircraft(teamId, factionId, aircraftType, positionXYZ, orientationDir, template.maxHealth);
 }
 
-function spawnGameModeAgents(){
-
-    switch (game.currentGamemode) {
-        case 'supremacy':
-            return spawnGameModeSupremacyFleet(teamId, factionId, centerXY, facingDir);
-        default:
-            return [];
-    }
-}
-
-function spawnGameModeSupremacyFleet(teamId, factionId, centerXY, facingDir) {
-    let ships = GAMEMODES.supremacy.spawnShips;
-    let spacing = 400; //meters between ships
-    let agents = [];
-
-    //arrange ships in a line perpendicular to facing direction --> this is a temporary solution. We will eventually 
-    //spawn them in nice formations.
-    let perpDir = [-facingDir[1], facingDir[0]];
-    let startOffset = -((ships.length - 1) / 2) * spacing;
-
-    for (let i = 0; i < ships.length; i++) {
-        let offset = startOffset + i * spacing;
-        let posXY = [
-            centerXY[0] + perpDir[0] * offset,
-            centerXY[1] + perpDir[1] * offset
-        ];
-        let ship = createShip(teamId, factionId, ships[i], posXY, facingDir);
-        if (ship) agents.push(ship);
-    }
-    return agents;
-}
-
-
-
-function spawnSupremacyAircraft(){
-
-    let aircrafts = [];
-    for (let i = 0; i < 2; i++) {
-        let aircraft = createAircraft(teamId, factionId, 'fighterSquadron', posXYZ, facingDir);
-        aircrafts.push(aircraft);
-    }
-    return aircrafts;
-}
-
-//where formation is of the type:
-//{ships: {shipType: {position}}}
-//{aircraft: {aircraftType: {position}}}
-//{bases: {baseType: {position}}}
-//these can repeated since we don't care about individual duplicates since they are well duplicates, so we can just run it for each.
-//
-
-//keep in mind game coordinates have 0,0 at top left, so up on map is negative y, down on map is positive y. left on map is negative x, right on map is positive x.
-//formationExmp = {shipFormation: {carrier: {position: [0, 0]}, battleship: {position: [-500, -80]}, battlecruiser: {position: [500,-80]}, heavycruiser: {position: [-500,-580]}, heavycruiser: {position: [500, -580]}, lightcruiser: {position: [-500,-1080]},lightcruiser: {position: [500,-1080]}, destroyer: {position: [-500, 420]},lightcruiser: {position: [500,420]}, destroyer: {position: [0,-1080]}}, 
-///aircraftFormation: {fighterSquadron: {position: [0, 100]}},
-
-//}
-
-//tests --> check if it works for all possible game configurations (e.g 2 teams with 1 faction each, 2 teams with 2 factions each, 3 teams with 1 or 2 each or some mix, 4 teams with 1 faction each, 4 w/ 2 factions each, etc.)
-
-
-
-
+//starter formation for supremacy - carrier-centered fleet
+//ship types must match SHIP_TEMPLATES keys (camelCase)
 const formationSupremacyStarter = {
     formationOrientation: [0, -1],
     shipFormation: [
-        { type: "carrier", position: [0, 0], orientation: [0, -1] },
-        { type: "battleship", position: [-500, -80], orientation: [0, -1] },
-        { type: "battlecruiser", position: [500, -80], orientation: [0, -1] },
-        { type: "heavycruiser", position: [-500, -580], orientation: [0, -1] },
-        { type: "heavycruiser", position: [500, -580], orientation: [0, -1] },
-        { type: "lightcruiser", position: [-500, -1080], orientation: [0, -1] },
-        { type: "lightcruiser", position: [500, -1080], orientation: [0, -1] },
-        { type: "destroyer", position: [-500, 420], orientation: [0, -1] },
-        { type: "lightcruiser", position: [500, 420], orientation: [0, -1] },
-        { type: "destroyer", position: [0, -1080], orientation: [0, -1] }
+        {type: 'carrier', position: [0, 0], orientation: [0, -1]},
+        {type: 'battleship', position: [-500, -80], orientation: [0, -1]},
+        {type: 'battlecruiser', position: [500, -80], orientation: [0, -1]},
+        {type: 'heavyCruiser', position: [-500, -580], orientation: [0, -1]},
+        {type: 'heavyCruiser', position: [500, -580], orientation: [0, -1]},
+        {type: 'lightCruiser', position: [-500, -1080], orientation: [0, -1]},
+        {type: 'lightCruiser', position: [500, -1080], orientation: [0, -1]},
+        {type: 'destroyer', position: [-500, 420], orientation: [0, -1]},
+        {type: 'destroyer', position: [500, 420], orientation: [0, -1]},
+        {type: 'destroyer', position: [0, -1580], orientation: [0, -1]}
     ],
-    aircraftFormation: [
-        { type: "fighterSquadron", position: [0, 100], orientation: [0, -1] }
+    aircraftFormation: [] //aircraft not yet implemented
+};
+
+//spawn positions for supremacy mode - map is 50km x 50km (0-50000 coords)
+//each entry: {position: [x,y], orientation: [dx,dy]} facing toward center
+const SPAWN_POSITIONS_SUPREMACY = {
+    //2 factions: top vs bottom
+    2: [
+        {position: [25000, 20000], orientation: [0, 1]},   //top, faces down
+        {position: [25000, 30000], orientation: [0, -1]}   //bottom, faces up
+    ],
+    //4 factions: one per cardinal direction
+    4: [
+        {position: [25000, 10000], orientation: [0, 1]},   //top
+        {position: [25000, 40000], orientation: [0, -1]},  //bottom
+        {position: [10000, 25000], orientation: [1, 0]},   //left
+        {position: [40000, 25000], orientation: [-1, 0]}   //right
+    ],
+    //8 factions: 2 per side (for 2v2, 4v4, etc)
+    8: [
+        {position: [21000, 10000], orientation: [0, 1]},   //top-left
+        {position: [29000, 10000], orientation: [0, 1]},   //top-right
+        {position: [21000, 40000], orientation: [0, -1]},  //bottom-left
+        {position: [29000, 40000], orientation: [0, -1]},  //bottom-right
+        {position: [10000, 21000], orientation: [1, 0]},   //left-top
+        {position: [10000, 29000], orientation: [1, 0]},   //left-bottom
+        {position: [40000, 21000], orientation: [-1, 0]},  //right-top
+        {position: [40000, 29000], orientation: [-1, 0]}   //right-bottom
     ]
 };
 
-const positionsOfFormationsSupremacy = {
-    {factions: 8, positionsOfMainFleets: [21000,15000],[29000,15000]],[[21000,35000],[29000,35000]],[[15000,21000],[15000,29000]],[[35000,21000],[35000,29000]],[[21000,35000],[29000,35000]],[[21000,15000],[29000,15000]],[[15000,21000],[15000,29000]],[[35000,21000],[35000,29000]]]} //on map, 21km to right, 15km to top, 29km to right, 15km to bottom, 21km to left, 15km to top, 29km to left, 15km to bottom
-    {factions: 4, positionsOfMainFleets: [25000,15000],[25000,35000],[15000,25000],[35000,25000]]} 
-}//we'll make their orientations respectively too. So like for 21000,15000 & 29000,15000 OR 25000,15000its orientation should be 0,1 because 1 is down.
-//for, say, 21000,35000 or 25000,35000 or 29000,35000, its orientation should be 1,0, since its to the right which is positive x in the cooordinates. Remember the map is 50km x 50km
+//unified formation spawner - takes formation dict, transforms by spawn position/orientation
+//returns {ships: [], aircraft: []} to be added to activeAgents
+function spawnFormation(formation, teamId, factionId, spawnPosXY, spawnOrientation) {
+    let result = {ships: [], aircraft: []};
 
-//,baseFormations: {} added later possibly.
+    //formation orientation is the "default" facing in the formation dict
+    //we rotate everything so that default facing becomes spawnOrientation
+    let formOri = formation.formationOrientation || [0, -1]; //default facing up
 
+    //calculate rotation from formation orientation to spawn orientation
+    let fromAngle = Math.atan2(formOri[1], formOri[0]);
+    let toAngle = Math.atan2(spawnOrientation[1], spawnOrientation[0]);
+    let rotAngle = toAngle - fromAngle;
+    let cos = Math.cos(rotAngle);
+    let sin = Math.sin(rotAngle);
 
-//baseFormations: {} added later 
-function spawnFormation(formations){
-    for (let formation of formations){  
-    if(formation.shipFormation){
-            for (let ship in formation.shipFormation){
-                createShip(ship.teamId, ship.factionId, ship.type, ship.position, ship.orientation);
-            }
-        }
-        if(formation.aircraftFormation){
-            for (let aircraft in formation.aircraftFormation){
-                createAircraft(aircraft.position);
-            }
-        }
-        if(formation.baseFormations){
-            for (let base in formation.baseFormations){
-                createBase(base.position);
-            }
+    //spawn ships
+    if (formation.shipFormation) {
+        for (let shipDef of formation.shipFormation) {
+            //rotate position relative to formation center
+            let rx = shipDef.position[0] * cos - shipDef.position[1] * sin;
+            let ry = shipDef.position[0] * sin + shipDef.position[1] * cos;
+            let worldPos = [spawnPosXY[0] + rx, spawnPosXY[1] + ry];
+
+            //rotate orientation
+            let oriX = shipDef.orientation[0] * cos - shipDef.orientation[1] * sin;
+            let oriY = shipDef.orientation[0] * sin + shipDef.orientation[1] * cos;
+            let worldOri = normalize([oriX, oriY]);
+
+            let ship = createShip(teamId, factionId, shipDef.type, worldPos, worldOri);
+            if (ship) result.ships.push(ship);
         }
     }
-}
 
-//we're going to have a big fleet spawner function that initiates all agents given formations we pass to it.
-//we will make a list of certain const = {};// formations will use these by default. 
+    //spawn aircraft (if any)
+    if (formation.aircraftFormation) {
+        for (let acDef of formation.aircraftFormation) {
+            let rx = acDef.position[0] * cos - acDef.position[1] * sin;
+            let ry = acDef.position[0] * sin + acDef.position[1] * cos;
+            let worldPos = [spawnPosXY[0] + rx, spawnPosXY[1] + ry, 500]; //default altitude 500m
+
+            let oriX = acDef.orientation[0] * cos - acDef.orientation[1] * sin;
+            let oriY = acDef.orientation[0] * sin + acDef.orientation[1] * cos;
+            let worldOri = normalize([oriX, oriY]);
+
+            let ac = createAircraft(teamId, factionId, acDef.type, worldPos, worldOri);
+            if (ac) result.aircraft.push(ac);
+        }
+    }
+
+    return result;
+} 
 
 
 
@@ -790,53 +960,52 @@ function startGameWithGameMode() {
     game.phase = 'playing';
     hideMenu();
 
-    //initialize activeAgents structure
+    //initialize activeAgents structure and count factions
     game.activeAgents = {};
+    let allFactions = []; //flat list of {teamId, factionId}
     for (let teamId in game.teams) {
         if (!game.teams[teamId].active) continue;
         game.activeAgents[teamId] = {};
         for (let factionId in game.teams[teamId].factions) {
-            game.activeAgents[teamId][factionId] = {
-                ships: [],
-                aircraft: [], //null/empty for now
-                bases: [] //null/empty for now
-            };
+            game.activeAgents[teamId][factionId] = {ships: [], aircraft: [], bases: []};
+            allFactions.push({teamId, factionId});
         }
     }
 
-    //spawn fleets based on gamemode --> this is only meaningful in the context that the center eventually means something
-    //when we spawn them in formations later on.
-    let teamPositions = [
-        {center: [-3000, 0], facing: [1, 0]},   //team 0 spawns left, faces right
-        {center: [3000, 0], facing: [-1, 0]},   //team 1 spawns right, faces left
-        {center: [0, -3000], facing: [0, 1]},   //team 2 spawns top, faces down
-        {center: [0, 3000], facing: [0, -1]}    //team 3 spawns bottom, faces up
-    ];
+    //pick spawn positions based on faction count (2, 4, or 8)
+    let factionCount = allFactions.length;
+    let posKey = factionCount <= 2 ? 2 : factionCount <= 4 ? 4 : 8;
+    let spawnPositions = SPAWN_POSITIONS_SUPREMACY[posKey];
 
-    for (let teamId in game.activeAgents) {
-        let teamIdx = parseInt(teamId);
-        let pos = teamPositions[teamIdx];
-        let factionOffsetIdx = 0;
+    //spawn each faction's fleet using the unified formation system
+    for (let i = 0; i < allFactions.length; i++) {
+        let {teamId, factionId} = allFactions[i];
+        let spawnIdx = i % spawnPositions.length;
+        let spawn = spawnPositions[spawnIdx];
 
-        for (let factionId in game.activeAgents[teamId]) {
-            //offset each faction slightly within team area
-            let factionOffset = (factionOffsetIdx - 0.5) * 800;
-            let perpDir = [-pos.facing[1], pos.facing[0]];
-            let factionCenter = [
-                pos.center[0] + perpDir[0] * factionOffset,
-                pos.center[1] + perpDir[1] * factionOffset
-            ];
+        //use supremacy starter formation for now
+        let result = spawnFormation(
+            formationSupremacyStarter,
+            teamId, factionId,
+            spawn.position, spawn.orientation
+        );
 
-            let ships = spawnGameModeSupremacyFleet(teamId, factionId, factionCenter, pos.facing);
-            game.activeAgents[teamId][factionId].ships = ships;
-            factionOffsetIdx++;
-        }
+        game.activeAgents[teamId][factionId].ships = result.ships;
+        game.activeAgents[teamId][factionId].aircraft = result.aircraft;
     }
+
+    //center camera on map center
+    camera.x = 25000;
+    camera.y = 25000;
+    camera.zoom = 10; //start fairly zoomed out to see fleets
 
     game.activeProjectiles = [];
     game.activeVFX = [];
     game.time = 0;
     game.isPaused = false;
+
+    //start ambient sounds
+    startSeaAmbience();
 
     //start game loop
     lastTime = performance.now();
@@ -866,6 +1035,27 @@ function forEachEnemyShip(myTeamId, callback) {
     }
 }
 
+function forEachAircraft(callback) {
+    for (let teamId in game.activeAgents) {
+        for (let factionId in game.activeAgents[teamId]) {
+            for (let ac of game.activeAgents[teamId][factionId].aircraft) {
+                callback(ac, teamId, factionId);
+            }
+        }
+    }
+}
+
+function forEachEnemyAircraft(myTeamId, callback) {
+    for (let teamId in game.activeAgents) {
+        if (parseInt(teamId) === parseInt(myTeamId)) continue;
+        for (let factionId in game.activeAgents[teamId]) {
+            for (let ac of game.activeAgents[teamId][factionId].aircraft) {
+                callback(ac, teamId, factionId);
+            }
+        }
+    }
+}
+
 // === GAME LOOP ===
 
 let lastTime = 0;
@@ -873,35 +1063,32 @@ let lastTime = 0;
 function gameLoop(currentTime) {
     let dt = (currentTime - lastTime) / 1000;
     lastTime = currentTime;
-    if (dt > 0.1) dt = 0.1; //cap dt to prevent spiral of death on lag spikes
+    if (dt > 0.1) dt = 0.1; //cap dt to prevent spiral of death
 
     if (!game.isPaused && game.phase === 'playing') {
         targetAndFireAndUpdateCollisions(dt);
+        updateAircraft(dt);
         updateProjectiles(dt);
         updateMovement(dt);
+        spawnWaterTrails(dt);
         updateVFX(dt);
         pruneDeadAgents();
         game.time += dt;
     }
 
-    //always update hover even when paused
     if (game.phase === 'playing') updateHover();
-
     render();
     requestAnimationFrame(gameLoop);
 }
 
-// === MOVEMENT ===
+// === MOVEMENT (ARC-BASED PATHFINDING) ===
 
 function updateMovement(dt) {
     forEachShip(ship => {
-        let template = SHIP_TEMPLATES[ship.shipType];
+        let t = SHIP_TEMPLATES[ship.shipType];
 
         if (!ship.targetPositionXY) {
-            //no target - decelerate to stop
-            if (ship.currentSpeed > 0) {
-                ship.currentSpeed = Math.max(0, ship.currentSpeed - template.acceleration * dt);
-            }
+            if (ship.currentSpeed > 0) ship.currentSpeed = Math.max(0, ship.currentSpeed - t.acceleration * dt);
             return;
         }
 
@@ -909,37 +1096,266 @@ function updateMovement(dt) {
         let dy = ship.targetPositionXY[1] - ship.positionXY[1];
         let distToTarget = Math.hypot(dx, dy);
 
-        //arrived at destination
-        if (distToTarget < 10) {
-            ship.targetPositionXY = null;
-            return;
-        }
+        if (distToTarget < 20) { ship.targetPositionXY = null; return; }
 
-        //calculate target angle and current angle
         let targetAngle = Math.atan2(dy, dx);
         let currentAngle = dirToAngle(ship.orientationDir);
         let angleDiff = normalizeAngle(targetAngle - currentAngle);
 
-        //turn toward target
-        let maxTurn = template.turnRate * dt;
-        let turnAmount = clamp(angleDiff, -maxTurn, maxTurn);
-        let newAngle = currentAngle + turnAmount;
-        ship.orientationDir = normalize([Math.cos(newAngle), Math.sin(newAngle)]);
+        //calculate turning radius at current speed: r = v / omega
+        let speed = Math.max(ship.currentSpeed, t.maxSpeed * 0.3); //min speed for turn calc
+        let turnRadius = speed / t.turnRate;
 
-        //accelerate/decelerate based on angle to target
-        //slow down when turning sharply
-        let angleFactor = 1 - Math.min(Math.abs(angleDiff) / Math.PI, 0.7);
-        let targetSpeed = template.maxSpeed * angleFactor;
+        //decide movement mode: arc turn vs straight
+        let absAngle = Math.abs(angleDiff);
+        let maxTurn = t.turnRate * dt;
 
-        if (ship.currentSpeed < targetSpeed) {
-            ship.currentSpeed = Math.min(targetSpeed, ship.currentSpeed + template.acceleration * dt);
+        if (absAngle > 0.1) {
+            //arc turn: follow curved path
+            //calculate arc center (perpendicular to current direction)
+            let turnDir = angleDiff > 0 ? 1 : -1;
+            let perpX = -ship.orientationDir[1] * turnDir;
+            let perpY = ship.orientationDir[0] * turnDir;
+            let arcCenterX = ship.positionXY[0] + perpX * turnRadius;
+            let arcCenterY = ship.positionXY[1] + perpY * turnRadius;
+
+            //check if target is reachable from this arc (target distance from arc center)
+            let targetToCenter = Math.hypot(ship.targetPositionXY[0] - arcCenterX, ship.targetPositionXY[1] - arcCenterY);
+
+            //if target is close to our turning circle, we'll reach it via arc
+            //otherwise turn until we can go straight
+            let turnAmount = Math.min(absAngle, maxTurn) * turnDir;
+            let newAngle = currentAngle + turnAmount;
+            ship.orientationDir = normalize([Math.cos(newAngle), Math.sin(newAngle)]);
+
+            //move along arc: position shifts around arc center
+            let arcAngle = turnAmount;
+            let cosA = Math.cos(arcAngle), sinA = Math.sin(arcAngle);
+            let relX = ship.positionXY[0] - arcCenterX;
+            let relY = ship.positionXY[1] - arcCenterY;
+            ship.positionXY[0] = arcCenterX + relX * cosA - relY * sinA;
+            ship.positionXY[1] = arcCenterY + relX * sinA + relY * cosA;
+
+            //also move forward slightly to prevent stalling
+            ship.positionXY[0] += ship.orientationDir[0] * speed * dt * 0.5;
+            ship.positionXY[1] += ship.orientationDir[1] * speed * dt * 0.5;
         } else {
-            ship.currentSpeed = Math.max(targetSpeed, ship.currentSpeed - template.acceleration * dt);
+            //straight line: just move forward
+            ship.positionXY[0] += ship.orientationDir[0] * ship.currentSpeed * dt;
+            ship.positionXY[1] += ship.orientationDir[1] * ship.currentSpeed * dt;
         }
 
-        //move forward
-        ship.positionXY[0] += ship.orientationDir[0] * ship.currentSpeed * dt;
-        ship.positionXY[1] += ship.orientationDir[1] * ship.currentSpeed * dt;
+        //speed control: slow when turning sharply
+        let angleFactor = 1 - Math.min(absAngle / Math.PI, 0.6);
+        let targetSpeed = t.maxSpeed * angleFactor;
+        if (ship.currentSpeed < targetSpeed) {
+            ship.currentSpeed = Math.min(targetSpeed, ship.currentSpeed + t.acceleration * dt);
+        } else {
+            ship.currentSpeed = Math.max(targetSpeed, ship.currentSpeed - t.acceleration * dt);
+        }
+    });
+}
+
+// === AIRCRAFT UPDATE ===
+
+function updateAircraft(dt) {
+    forEachAircraft((ac, teamId) => {
+        let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+        ac.flightTime += dt;
+        ac.unitsAlive = Math.ceil(ac.health / t.healthPerUnit);
+
+        //dogfighting
+        if (ac.state === 'dogfight' && ac.dogfightTarget) {
+            let enemy = ac.dogfightTarget;
+            if (enemy.health <= 0) {
+                ac.dogfightTarget = null;
+                ac.state = 'idle';
+            } else {
+                //both deal damage based on DPS * fatigue * remaining units
+                let myDPS = t.dogfightDPS * ac.fatigueMultiplier * ac.unitsAlive;
+                let enemyT = AIRCRAFT_TEMPLATES[enemy.aircraftType];
+                let enemyDPS = enemyT.dogfightDPS * enemy.fatigueMultiplier * enemy.unitsAlive;
+                ac.health -= enemyDPS * dt;
+                enemy.health -= myDPS * dt;
+                //circle around each other
+                let mx = (ac.positionXY[0] + enemy.positionXY[0]) / 2;
+                let my = (ac.positionXY[1] + enemy.positionXY[1]) / 2;
+                let angle = Math.atan2(ac.positionXY[1] - my, ac.positionXY[0] - mx) + dt * 2;
+                ac.positionXY[0] = mx + Math.cos(angle) * 200;
+                ac.positionXY[1] = my + Math.sin(angle) * 200;
+            }
+        }
+        //bombing run
+        else if (ac.state === 'bombing' && ac.bombTarget) {
+            let target = ac.bombTarget;
+            if (target.health <= 0) {
+                ac.bombTarget = null;
+                ac.state = 'returning';
+            } else {
+                let d = dist(ac.positionXY, target.positionXY);
+                if (d < 500 && (ac.bombs > 0 || ac.torpedoes > 0)) {
+                    //drop ordnance
+                    if (ac.bombs > 0) {
+                        ac.bombs--;
+                        spawnBomb(ac, target);
+                    } else if (ac.torpedoes > 0) {
+                        ac.torpedoes--;
+                        spawnTorpedo(ac, target);
+                    }
+                    if (ac.bombs <= 0 && ac.torpedoes <= 0) ac.state = 'returning';
+                } else {
+                    //fly toward target
+                    moveAircraftToward(ac, target.positionXY, dt);
+                }
+            }
+        }
+        //moving to target position
+        else if (ac.state === 'moving' && ac.targetPositionXY) {
+            let d = dist(ac.positionXY, ac.targetPositionXY);
+            if (d < 100) {
+                ac.targetPositionXY = null;
+                ac.state = 'idle';
+            } else {
+                moveAircraftToward(ac, ac.targetPositionXY, dt);
+            }
+        }
+        //returning to carrier
+        else if (ac.state === 'returning' && ac.homeCarrier) {
+            if (ac.homeCarrier.health <= 0) {
+                ac.homeCarrier = null;
+                ac.state = 'idle';
+            } else {
+                let d = dist(ac.positionXY, ac.homeCarrier.positionXY);
+                if (d < 200) {
+                    //land and rearm
+                    ac.flightTime = 0;
+                    ac.torpedoes = t.torpedoCapacity || 0;
+                    //arm with bombs if requested or if already armed
+                    if (ac.armOnLanding || ac.armed) {
+                        ac.armed = true;
+                        ac.bombs = t.bombCapacity || 0;
+                    }
+                    ac.armOnLanding = false;
+                    ac.health = Math.min(ac.maxHealth, ac.health + 20); //heal on landing
+                    ac.state = 'idle';
+                } else {
+                    moveAircraftToward(ac, ac.homeCarrier.positionXY, dt);
+                }
+            }
+        }
+        //launching - takeoff animation from carrier
+        else if (ac.state === 'launching') {
+            ac.launchProgress += dt;
+            if (ac.homeCarrier && ac.homeCarrier.health > 0) {
+                //move along carrier deck, then climb
+                let carrier = ac.homeCarrier;
+                let deckLength = SHIP_TEMPLATES.carrier.length;
+                let runwayProgress = Math.min(ac.launchProgress / 2, 1); //2 seconds on deck
+
+                //position along carrier runway
+                let deckPos = -deckLength/2 + runwayProgress * deckLength;
+                ac.positionXY[0] = carrier.positionXY[0] + carrier.orientationDir[0] * deckPos;
+                ac.positionXY[1] = carrier.positionXY[1] + carrier.orientationDir[1] * deckPos;
+                ac.orientationDir = [...carrier.orientationDir];
+
+                //climb after leaving deck
+                if (runwayProgress >= 1) {
+                    ac.positionXYZ[2] = 50 + (ac.launchProgress - 2) * 150; //climb rate 150m/s
+                    //move forward while climbing
+                    ac.positionXY[0] += ac.orientationDir[0] * ac.currentSpeed * dt;
+                    ac.positionXY[1] += ac.orientationDir[1] * ac.currentSpeed * dt;
+
+                    if (ac.positionXYZ[2] >= 500) { //cruise altitude
+                        ac.positionXYZ[2] = 500;
+                        ac.state = 'idle';
+                    }
+                } else {
+                    ac.positionXYZ[2] = 20; //deck height
+                }
+            } else {
+                //carrier destroyed during takeoff
+                ac.state = 'idle';
+                ac.positionXYZ[2] = 500;
+            }
+        }
+        //idle - check for nearby enemies to engage
+        else if (ac.state === 'idle') {
+            forEachEnemyAircraft(teamId, enemy => {
+                if (ac.state !== 'idle') return;
+                if (dist(ac.positionXY, enemy.positionXY) < 1500) {
+                    ac.state = 'dogfight';
+                    ac.dogfightTarget = enemy;
+                    if (enemy.state === 'idle') {
+                        enemy.state = 'dogfight';
+                        enemy.dogfightTarget = ac;
+                    }
+                }
+            });
+        }
+
+        //sync 2D and 3D position
+        ac.positionXYZ[0] = ac.positionXY[0];
+        ac.positionXYZ[1] = ac.positionXY[1];
+    });
+}
+
+function moveAircraftToward(ac, targetXY, dt) {
+    let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+    let dx = targetXY[0] - ac.positionXY[0];
+    let dy = targetXY[1] - ac.positionXY[1];
+    let targetAngle = Math.atan2(dy, dx);
+    let currentAngle = dirToAngle(ac.orientationDir);
+    let angleDiff = normalizeAngle(targetAngle - currentAngle);
+    let maxTurn = t.turnRate * dt;
+    let newAngle = currentAngle + clamp(angleDiff, -maxTurn, maxTurn);
+    ac.orientationDir = normalize([Math.cos(newAngle), Math.sin(newAngle)]);
+    ac.positionXY[0] += ac.orientationDir[0] * ac.currentSpeed * dt;
+    ac.positionXY[1] += ac.orientationDir[1] * ac.currentSpeed * dt;
+}
+
+function spawnBomb(ac, target) {
+    let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+    let errorRadius = ac.positionXYZ[2] * 0.1; //10% of altitude as error
+    let destXY = [
+        target.positionXY[0] + (Math.random() - 0.5) * errorRadius * 2,
+        target.positionXY[1] + (Math.random() - 0.5) * errorRadius * 2
+    ];
+    game.activeProjectiles.push({
+        id: randomId(), positionXY: [...ac.positionXY], destinationXY: destXY,
+        velocityXY: [0, 0], damage: t.bombDamage, sourceTeam: ac.team,
+        type: 'bomb', altitude: ac.positionXYZ[2], fallSpeed: 200
+    });
+}
+
+function spawnTorpedo(ac, target) {
+    let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+    let dir = normalize([target.positionXY[0] - ac.positionXY[0], target.positionXY[1] - ac.positionXY[1]]);
+    game.activeProjectiles.push({
+        id: randomId(), positionXY: [...ac.positionXY], destinationXY: [...target.positionXY],
+        velocityXY: [dir[0] * 25, dir[1] * 25], damage: t.torpedoDamage || 300,
+        sourceTeam: ac.team, type: 'torpedo', targetShip: target
+    });
+}
+
+// === WATER TRAILS ===
+
+let lastTrailTime = 0;
+function spawnWaterTrails(dt) {
+    lastTrailTime += dt;
+    if (lastTrailTime < 0.3) return;
+    lastTrailTime = 0;
+    forEachShip(ship => {
+        if (ship.currentSpeed > 1) {
+            let t = SHIP_TEMPLATES[ship.shipType];
+            //spawn trail behind ship at stern position
+            let sternX = ship.positionXY[0] - ship.orientationDir[0] * (t.length / 2);
+            let sternY = ship.positionXY[1] - ship.orientationDir[1] * (t.length / 2);
+            game.activeVFX.push({
+                type: 'trail', positionXY: [sternX, sternY], age: 0, maxAge: 5,
+                dir: [...ship.orientationDir], length: ship.currentSpeed * 3 + t.beam,
+                width: t.beam * 0.6
+            });
+        }
     });
 }
 
@@ -956,10 +1372,11 @@ function targetAndFireAndUpdateCollisions(dt) {
         }
 
         if (ship.targetMode === 'auto') {
-            //non-AA hitpoints: priority-based targeting against ships
+            //cannon hitpoints: priority-based targeting against ships
+            //skip AA (aircraft only) and torpedoMount (no auto-targeting yet)
             for (let hpName in ship.hitpoints) {
                 let hp = ship.hitpoints[hpName];
-                if (hp.destroyed || hp.type === 'AA') continue;
+                if (hp.destroyed || hp.type === 'AA' || hp.type === 'torpedoMount' || hp.type === 'hangarBay') continue;
                 if (hp.cooldown > 0.0001) continue;
 
                 let best = findBestShipTarget(ship, hp);
@@ -969,8 +1386,28 @@ function targetAndFireAndUpdateCollisions(dt) {
                 }
             }
 
-            //AA hitpoints: distance-based, targets aircraft only (not implemented yet)
-            //will add when aircraft exist
+            //AA hitpoints: distance-based, targets aircraft
+            for (let hpName in ship.hitpoints) {
+                let hp = ship.hitpoints[hpName];
+                if (hp.destroyed || hp.type !== 'AA') continue;
+                if (hp.cooldown > 0.0001) continue;
+                let target = findClosestEnemyAircraft(ship);
+                if (target) {
+                    fireAAatAircraft(ship, hp, target);
+                    hp.cooldown = HITPOINT_TYPES.AA.maxCooldown;
+                }
+            }
+            //torpedoMount: fires sideways only when enemy in arc
+            for (let hpName in ship.hitpoints) {
+                let hp = ship.hitpoints[hpName];
+                if (hp.destroyed || hp.type !== 'torpedoMount') continue;
+                if (hp.cooldown > 0.0001) continue;
+                let target = findTorpedoTarget(ship, hp);
+                if (target) {
+                    fireShipTorpedo(ship, hp, target);
+                    hp.cooldown = HITPOINT_TYPES.torpedoMount.maxCooldown;
+                }
+            }
 
         } else if (ship.targetMode === 'agent' || ship.targetMode === 'hitpoint') {
             //locked onto specific target
@@ -984,10 +1421,10 @@ function targetAndFireAndUpdateCollisions(dt) {
                 return;
             }
 
-            //non-AA hitpoints fire at locked target
+            //cannon hitpoints fire at locked target
             for (let hpName in ship.hitpoints) {
                 let hp = ship.hitpoints[hpName];
-                if (hp.destroyed || hp.type === 'AA') continue;
+                if (hp.destroyed || hp.type === 'AA' || hp.type === 'torpedoMount' || hp.type === 'hangarBay') continue;
                 if (hp.cooldown > 0.0001) continue;
 
                 let range = HITPOINT_TYPES[hp.type].range;
@@ -1027,6 +1464,73 @@ function findBestShipTarget(ship, hp) {
     return bestTarget;
 }
 
+function findClosestEnemyAircraft(ship) {
+    let closest = null, closestDist = HITPOINT_TYPES.AA.range;
+    forEachEnemyAircraft(ship.team, ac => {
+        let d = dist(ship.positionXY, ac.positionXY);
+        if (d < closestDist) { closestDist = d; closest = ac; }
+    });
+    return closest;
+}
+
+function fireAAatAircraft(ship, hp, target) {
+    let hpXY = getHitpointWorldPos(ship, hp);
+    playSound('AA', hpXY);
+    //spawn AA projectile that travels toward target
+    let projSpeed = HITPOINT_TYPES.AA.projectileSpeed;
+    let d = dist(hpXY, target.positionXY);
+    let timeToHit = d / projSpeed;
+    //lead targeting for aircraft
+    let aimXY = [
+        target.positionXY[0] + target.orientationDir[0] * target.currentSpeed * timeToHit,
+        target.positionXY[1] + target.orientationDir[1] * target.currentSpeed * timeToHit
+    ];
+    //add accuracy error
+    let error = d * 0.08;
+    aimXY[0] += (Math.random() - 0.5) * error;
+    aimXY[1] += (Math.random() - 0.5) * error;
+    let dir = normalize([aimXY[0] - hpXY[0], aimXY[1] - hpXY[1]]);
+    game.activeProjectiles.push({
+        id: randomId(), positionXY: [...hpXY], destinationXY: aimXY,
+        velocityXY: [dir[0] * projSpeed, dir[1] * projSpeed],
+        damage: HITPOINT_TYPES.AA.damage, sourceTeam: ship.team,
+        type: 'AA', targetAircraft: target
+    });
+}
+
+function findTorpedoTarget(ship, hp) {
+    //torpedoes fire sideways - check if enemy is roughly perpendicular
+    let hpXY = getHitpointWorldPos(ship, hp);
+    let isLeft = hp.relPosXY[0] < 0;
+    let torpDir = isLeft ? [-ship.orientationDir[1], ship.orientationDir[0]]
+                        : [ship.orientationDir[1], -ship.orientationDir[0]];
+    let best = null, bestDist = HITPOINT_TYPES.torpedoMount.range;
+    forEachEnemyShip(ship.team, enemy => {
+        let toEnemy = normalize([enemy.positionXY[0] - hpXY[0], enemy.positionXY[1] - hpXY[1]]);
+        let dot = toEnemy[0] * torpDir[0] + toEnemy[1] * torpDir[1];
+        if (dot < 0.5) return; //must be roughly in torpedo arc (60 deg)
+        let d = dist(hpXY, enemy.positionXY);
+        if (d < bestDist) { bestDist = d; best = enemy; }
+    });
+    return best;
+}
+
+function fireShipTorpedo(ship, hp, target) {
+    if (ship.torpedoCount <= 0) return;
+    let hpXY = getHitpointWorldPos(ship, hp);
+    playSound('splash', hpXY); //torpedo launch splash
+    let dir = normalize([target.positionXY[0] - hpXY[0], target.positionXY[1] - hpXY[1]]);
+    let speed = HITPOINT_TYPES.torpedoMount.projectileSpeed;
+    game.activeProjectiles.push({
+        id: randomId(), positionXY: [...hpXY],
+        velocityXY: [dir[0] * speed, dir[1] * speed],
+        destinationXY: [...target.positionXY],
+        damage: HITPOINT_TYPES.torpedoMount.damage,
+        sourceTeam: ship.team, type: 'torpedo', targetShip: target
+    });
+    ship.torpedoCount--;
+}
+
 function getHitpointWorldPos(ship, hp) {
     //transform hitpoint relative position by ship orientation
     let xDir = ship.orientationDir[0];
@@ -1046,6 +1550,9 @@ function getHitpointWorldPos(ship, hp) {
 function fireAtShip(shooter, hp, target, targetHitpointName = null) {
     let hpWorldXY = getHitpointWorldPos(shooter, hp);
     let projSpeed = HITPOINT_TYPES[hp.type].projectileSpeed;
+    //play cannon sound based on caliber
+    let soundName = 'cannon' + hp.type.charAt(0).toUpperCase() + hp.type.slice(1);
+    playSound(soundName, hpWorldXY);
 
     //determine aim point - either specific hitpoint or ship center
     let baseAimXY;
@@ -1094,22 +1601,102 @@ function updateProjectiles(dt) {
     for (let i = game.activeProjectiles.length - 1; i >= 0; i--) {
         let proj = game.activeProjectiles[i];
 
-        //move projectile
-        proj.positionXY[0] += proj.velocityXY[0] * dt;
-        proj.positionXY[1] += proj.velocityXY[1] * dt;
-
-        //check if reached destination
-        let toDest = dist(proj.positionXY, proj.destinationXY);
-        if (toDest < 20) { //close enough to destination
-            //check if destination is inside any enemy ship
-            let hitShip = findShipAtPoint(proj.destinationXY, proj.sourceTeam);
-            if (hitShip) {
-                applyDamageToShip(hitShip, proj.damage, proj.destinationXY);
-                spawnVFX('hit', proj.destinationXY);
-            } else {
-                spawnVFX('splash', proj.destinationXY);
+        if (proj.type === 'bomb') {
+            //bombs fall straight down (in altitude), drift toward destination
+            proj.altitude -= proj.fallSpeed * dt;
+            let drift = 50 * dt;
+            let dx = proj.destinationXY[0] - proj.positionXY[0];
+            let dy = proj.destinationXY[1] - proj.positionXY[1];
+            let d = Math.hypot(dx, dy);
+            if (d > drift) {
+                proj.positionXY[0] += (dx / d) * drift;
+                proj.positionXY[1] += (dy / d) * drift;
             }
-            game.activeProjectiles.splice(i, 1);
+            if (proj.altitude <= 0) {
+                let hitShip = findShipAtPoint(proj.positionXY, proj.sourceTeam);
+                if (hitShip) {
+                    applyDamageToShip(hitShip, proj.damage, proj.positionXY);
+                    spawnVFX('hit', proj.positionXY);
+                    playSound('hit', proj.positionXY);
+                } else {
+                    spawnVFX('splash', proj.positionXY);
+                    playSound('splash', proj.positionXY);
+                }
+                game.activeProjectiles.splice(i, 1);
+            }
+        } else if (proj.type === 'torpedo') {
+            //torpedoes track target ship slowly
+            if (proj.targetShip && proj.targetShip.health > 0) {
+                let dir = normalize([proj.targetShip.positionXY[0] - proj.positionXY[0],
+                                    proj.targetShip.positionXY[1] - proj.positionXY[1]]);
+                proj.velocityXY = [dir[0] * 25, dir[1] * 25];
+            }
+            proj.positionXY[0] += proj.velocityXY[0] * dt;
+            proj.positionXY[1] += proj.velocityXY[1] * dt;
+
+             //spawn water trail behind torpedo
+            if (!proj.lastTrailTime) proj.lastTrailTime = 0;
+            proj.lastTrailTime += dt;
+            if (proj.lastTrailTime >= 0.1) { //spawn trail every 0.1 seconds (more frequent than ships)
+                proj.lastTrailTime = 0;
+                let speed = Math.hypot(proj.velocityXY[0], proj.velocityXY[1]);
+                if (speed > 0) {
+                    let dir = normalize(proj.velocityXY);
+                    //trail spawns behind torpedo (opposite direction of travel)
+                    let trailX = proj.positionXY[0] - dir[0] * 2; //2m behind
+                    let trailY = proj.positionXY[1] - dir[1] * 2;
+                    game.activeVFX.push({
+                        type: 'trail', 
+                        positionXY: [trailX, trailY], 
+                        age: 0, 
+                        maxAge: 3, //shorter than ship trails
+                        dir: [-dir[0], -dir[1]], //point backward
+                        length: speed * 0.5, //shorter trail than ships
+                        width: 1.5 //narrower than ship trails
+                    });
+                }
+            }
+
+            let hitShip = findShipAtPoint(proj.positionXY, proj.sourceTeam);
+            if (hitShip) {
+                applyDamageToShip(hitShip, proj.damage, proj.positionXY);
+                spawnVFX('hit', proj.positionXY);
+                playSound('hit', proj.positionXY);
+                game.activeProjectiles.splice(i, 1);
+            } else if (dist(proj.positionXY, proj.destinationXY) > 15000) {
+                game.activeProjectiles.splice(i, 1);
+            }
+        } else if (proj.type === 'AA') {
+            //AA projectile - check if reached destination or hit aircraft
+            proj.positionXY[0] += proj.velocityXY[0] * dt;
+            proj.positionXY[1] += proj.velocityXY[1] * dt;
+            if (dist(proj.positionXY, proj.destinationXY) < 50) {
+                //check if aircraft is near destination
+                if (proj.targetAircraft && proj.targetAircraft.health > 0) {
+                    let acDist = dist(proj.positionXY, proj.targetAircraft.positionXY);
+                    if (acDist < 80) {
+                        proj.targetAircraft.health -= proj.damage;
+                        spawnVFX('AAburst', proj.positionXY);
+                    }
+                }
+                game.activeProjectiles.splice(i, 1);
+            }
+        } else {
+            //shell projectile - move and check destination
+            proj.positionXY[0] += proj.velocityXY[0] * dt;
+            proj.positionXY[1] += proj.velocityXY[1] * dt;
+            if (dist(proj.positionXY, proj.destinationXY) < 20) {
+                let hitShip = findShipAtPoint(proj.destinationXY, proj.sourceTeam);
+                if (hitShip) {
+                    applyDamageToShip(hitShip, proj.damage, proj.destinationXY);
+                    spawnVFX('hit', proj.destinationXY);
+                    playSound('hit', proj.destinationXY);
+                } else {
+                    spawnVFX('splash', proj.destinationXY);
+                    playSound('splash', proj.destinationXY);
+                }
+                game.activeProjectiles.splice(i, 1);
+            }
         }
     }
 }
@@ -1254,15 +1841,24 @@ function updateVFX(dt) {
 function pruneDeadAgents() {
     for (let teamId in game.activeAgents) {
         for (let factionId in game.activeAgents[teamId]) {
+            //prune ships
             let ships = game.activeAgents[teamId][factionId].ships;
             for (let i = ships.length - 1; i >= 0; i--) {
                 if (ships[i].health <= 0) {
-                    //deselect if selected
                     let idx = input.selectedAgents.indexOf(ships[i]);
                     if (idx !== -1) input.selectedAgents.splice(idx, 1);
-
-                    spawnVFX('hit', ships[i].positionXY); //death explosion
+                    spawnVFX('hit', ships[i].positionXY);
                     ships.splice(i, 1);
+                }
+            }
+            //prune aircraft
+            let aircraft = game.activeAgents[teamId][factionId].aircraft;
+            for (let i = aircraft.length - 1; i >= 0; i--) {
+                if (aircraft[i].health <= 0) {
+                    let idx = input.selectedAgents.indexOf(aircraft[i]);
+                    if (idx !== -1) input.selectedAgents.splice(idx, 1);
+                    spawnVFX('hit', aircraft[i].positionXY);
+                    aircraft.splice(i, 1);
                 }
             }
         }
@@ -1271,218 +1867,406 @@ function pruneDeadAgents() {
 
 // === RENDERING ===
 
-function render() {
-    //clear with sea color
-    ctx.fillStyle = '#1a3a5c';
+//simple depth-based sea with wave patterns
+function renderSeaTexture() {
+    //base deep sea color
+    ctx.fillStyle = '#0d2a44';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (game.phase !== 'playing') return;
 
+    //draw varying depth bands based on world position (simulates underwater topology)
+    let bandSize = 2000 / camera.zoom; //world size of each depth band
+    let worldTopLeft = screenToWorld(0, 0);
+    let worldBotRight = screenToWorld(canvas.width, canvas.height);
+
+    //draw depth variation using simple sine pattern
+    let step = Math.max(4, 50 / camera.zoom); //pixel step size
+    for (let sy = 0; sy < canvas.height; sy += step) {
+        for (let sx = 0; sx < canvas.width; sx += step) {
+            let [wx, wy] = screenToWorld(sx, sy);
+            //depth based on distance from map center and sine wave patterns
+            let distFromCenter = Math.hypot(wx - 25000, wy - 25000);
+            let baseDepth = 0.3 + 0.4 * (distFromCenter / 35000); //deeper toward edges
+            //add wave patterns
+            let wave1 = Math.sin(wx * 0.0003 + wy * 0.0002) * 0.15;
+            let wave2 = Math.sin(wx * 0.0001 - wy * 0.00015) * 0.1;
+            let depth = clamp(baseDepth + wave1 + wave2, 0, 1);
+
+            //color: shallow = lighter cyan, deep = darker blue
+            let r = Math.floor(15 + (1 - depth) * 30);
+            let g = Math.floor(45 + (1 - depth) * 60);
+            let b = Math.floor(70 + (1 - depth) * 50);
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(sx, sy, step, step);
+        }
+    }
+
+    //add subtle wave highlights (only when zoomed in enough)
+    if (camera.zoom < 5) {
+        ctx.strokeStyle = 'rgba(150,200,230,0.1)';
+        ctx.lineWidth = 1;
+        let waveSpacing = 300 / camera.zoom;
+        let offset = (game.time || 0) * 20; //animate waves
+        for (let i = -2; i < canvas.width / waveSpacing + 2; i++) {
+            let sx = (i * waveSpacing + offset % waveSpacing);
+            ctx.beginPath();
+            ctx.moveTo(sx, 0);
+            for (let y = 0; y < canvas.height; y += 20) {
+                ctx.lineTo(sx + Math.sin(y * 0.01 + offset * 0.1) * 10, y);
+            }
+            ctx.stroke();
+        }
+    }
+}
+
+function render() {
+    //depth-based sea texture - draw gradient strips based on world position
+    renderSeaTexture();
+
+    if (game.phase !== 'playing') return;
+
+    //render water trails first (behind everything)
+    for (let vfx of game.activeVFX) {
+        if (vfx.type === 'trail') renderWaterTrail(vfx);
+    }
+
     //render ships
-    forEachShip((ship, teamId, factionId) => {
-        renderShip(ship, teamId, factionId);
-    });
+    forEachShip((ship, teamId, factionId) => renderShip(ship, teamId, factionId));
+
+    //render aircraft shadows
+    forEachAircraft(ac => renderAircraftShadow(ac));
 
     //render projectiles
-    for (let proj of game.activeProjectiles) {
-        renderProjectile(proj);
-    }
+    for (let proj of game.activeProjectiles) renderProjectile(proj);
 
-    //render VFX
+    //render aircraft (above everything else)
+    forEachAircraft((ac, teamId, factionId) => renderAircraft(ac, teamId, factionId));
+
+    //render VFX (except trails which were rendered first)
     for (let vfx of game.activeVFX) {
-        renderVFX(vfx);
+        if (vfx.type !== 'trail') renderVFX(vfx);
     }
 
-    //render selection box if dragging
+    //selection box
     if (input.isDragging && input.dragStartXY && input.dragEndXY) {
-        ctx.strokeStyle = '#00ff00';
+        ctx.strokeStyle = '#0f0';
         ctx.lineWidth = 1;
         ctx.setLineDash([5, 5]);
         let x = Math.min(input.dragStartXY[0], input.dragEndXY[0]);
         let y = Math.min(input.dragStartXY[1], input.dragEndXY[1]);
-        let w = Math.abs(input.dragEndXY[0] - input.dragStartXY[0]);
-        let h = Math.abs(input.dragEndXY[1] - input.dragStartXY[1]);
-        ctx.strokeRect(x, y, w, h);
+        ctx.strokeRect(x, y, Math.abs(input.dragEndXY[0] - input.dragStartXY[0]),
+                            Math.abs(input.dragEndXY[1] - input.dragStartXY[1]));
         ctx.setLineDash([]);
     }
 }
 
 function renderShip(ship, teamId, factionId) {
-    let template = SHIP_TEMPLATES[ship.shipType];
-    let screenXY = worldToScreen(ship.positionXY[0], ship.positionXY[1]);
-
-    //scale dimensions by zoom
-    let screenBeam = template.beam / camera.zoom;
-    let screenLength = template.length / camera.zoom;
-
-    //get faction color
+    let t = SHIP_TEMPLATES[ship.shipType];
+    let sXY = worldToScreen(ship.positionXY[0], ship.positionXY[1]);
+    let sB = t.beam / camera.zoom, sL = t.length / camera.zoom;
     let faction = game.teams[teamId]?.factions[factionId];
-    let color = faction?.color || '#888888';
+    let color = faction?.color || '#888';
+    let angle = Math.atan2(ship.orientationDir[1], ship.orientationDir[0]) + Math.PI/2;
 
     ctx.save();
-    ctx.translate(screenXY[0], screenXY[1]);
+    ctx.translate(sXY[0], sXY[1]);
+    ctx.rotate(angle);
 
-    //rotate so ship points in orientationDir
-    //orientationDir [1,0] means pointing right, we draw ship with bow pointing up by default
-    let angle = Math.atan2(ship.orientationDir[1], ship.orientationDir[0]);
-    ctx.rotate(angle + Math.PI / 2); //+90deg so [1,0] dir means bow points right
-
-    //draw ship hull - rectangle with pointed bow
+    //hull: ellipse for most ships, rectangle for carrier
     ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(0, -screenLength / 2); //bow point
-    ctx.lineTo(screenBeam / 2, -screenLength / 2 + screenLength * 0.15); //bow right
-    ctx.lineTo(screenBeam / 2, screenLength / 2); //stern right
-    ctx.lineTo(-screenBeam / 2, screenLength / 2); //stern left
-    ctx.lineTo(-screenBeam / 2, -screenLength / 2 + screenLength * 0.15); //bow left
-    ctx.closePath();
-    ctx.fill();
-
-    //outline
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 1;
-    ctx.stroke();
+    if (ship.shipType === 'carrier') {
+        ctx.fillRect(-sB/2, -sL/2, sB, sL);
+        ctx.strokeRect(-sB/2, -sL/2, sB, sL);
+        //flight deck lines
+        ctx.strokeStyle = '#555';
+        ctx.beginPath();
+        ctx.moveTo(-sB/3, -sL/2); ctx.lineTo(-sB/3, sL/2);
+        ctx.moveTo(sB/3, -sL/2); ctx.lineTo(sB/3, sL/2);
+        ctx.stroke();
+        //bridge on starboard side
+        ctx.fillStyle = '#444';
+        ctx.fillRect(sB/2 - 4/camera.zoom, -sL*0.3, 8/camera.zoom, sL*0.15);
+    } else {
+        ctx.beginPath();
+        ctx.ellipse(0, 0, sB/2, sL/2, 0, 0, Math.PI*2);
+        ctx.fill();
+        ctx.stroke();
+    }
 
+    //superstructures
+    ctx.fillStyle = '#555';
+    let supers = SUPERSTRUCTURES[ship.shipType] || [];
+    for (let s of supers) {
+        let sy = s.y / camera.zoom, sw = s.w / camera.zoom, sh = s.h / camera.zoom;
+        if (ship.shipType === 'carrier') {
+            ctx.fillRect(sB/2 - sw, sy - sh/2, sw, sh); //bridge on side
+        } else {
+            ctx.fillRect(-sw/2, sy - sh/2, sw, sh);
+        }
+    }
+
+    //turrets and AA - draw after hull
+    for (let hpName in ship.hitpoints) {
+        let hp = ship.hitpoints[hpName];
+        let rx = hp.relPosXY[0] / camera.zoom, ry = hp.relPosXY[1] / camera.zoom;
+
+        if (hp.type === 'AA') {
+            //AA cluster: 3 small black squares
+            ctx.fillStyle = hp.destroyed ? '#222' : '#111';
+            let sqSize = 2 / camera.zoom;
+            ctx.fillRect(rx - sqSize*1.5, ry - sqSize/2, sqSize, sqSize);
+            ctx.fillRect(rx - sqSize/2, ry - sqSize/2, sqSize, sqSize);
+            ctx.fillRect(rx + sqSize/2, ry - sqSize/2, sqSize, sqSize);
+        } else if (hp.type !== 'hangarBay') {
+            //turret: dark circle with radius based on gun caliber
+            let rad = (TURRET_RADII[hp.type] || 4) / camera.zoom;
+            ctx.fillStyle = hp.destroyed ? '#222' : '#333';
+            ctx.beginPath();
+            ctx.arc(rx, ry, rad, 0, Math.PI*2);
+            ctx.fill();
+            ctx.strokeStyle = '#111';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+    }
     ctx.restore();
 
     let isSelected = input.selectedAgents.includes(ship);
     let isHovered = input.hoveredShip === ship;
-    let showDetails = isSelected || isHovered;
 
-    //selection ring
+    //selection ring (faction color)
     if (isSelected) {
-        ctx.strokeStyle = '#00ff00';
+        ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(screenXY[0], screenXY[1], Math.max(screenBeam, screenLength) / 2 + 5, 0, Math.PI * 2);
+        ctx.arc(sXY[0], sXY[1], Math.max(sB, sL)/2 + 5, 0, Math.PI*2);
         ctx.stroke();
     }
 
-    //health bar (show for selected or hovered ships)
-    if (showDetails) {
-        let barW = 50;
-        let barH = 6;
-        let barX = screenXY[0] - barW / 2;
-        let barY = screenXY[1] - screenLength / 2 - 15;
-        let healthPct = ship.health / ship.maxHealth;
-
+    //health bar
+    if (isSelected || isHovered) {
+        let barW = 50, barH = 6;
+        let barX = sXY[0] - barW/2, barY = sXY[1] - sL/2 - 15;
+        let pct = ship.health / ship.maxHealth;
         ctx.fillStyle = '#333';
         ctx.fillRect(barX, barY, barW, barH);
-        //green > 60%, yellow 30-60%, red < 30%
-        ctx.fillStyle = healthPct > 0.6 ? '#0f0' : (healthPct > 0.3 ? '#ff0' : '#f00');
-        ctx.fillRect(barX, barY, barW * healthPct, barH);
+        ctx.fillStyle = pct > 0.6 ? '#0f0' : pct > 0.3 ? '#ff0' : '#f00';
+        ctx.fillRect(barX, barY, barW * pct, barH);
 
-        //render hitpoints
-        renderShipHitpoints(ship, isHovered);
+        //hitpoint health bars when hovered
+        if (isHovered) renderHitpointBars(ship);
     }
 }
 
-function renderShipHitpoints(ship, showHealthBars) {
+function renderHitpointBars(ship) {
     for (let hpName in ship.hitpoints) {
         let hp = ship.hitpoints[hpName];
-        let hpWorldXY = getHitpointWorldPos(ship, hp);
-        let hpScreenXY = worldToScreen(hpWorldXY[0], hpWorldXY[1]);
+        if (hp.destroyed || hp.type === 'hangarBay') continue;
+        let hpXY = worldToScreen(...getHitpointWorldPos(ship, hp));
+        let rad = (TURRET_RADII[hp.type] || 4) / camera.zoom;
+        let barW = 16, barH = 2;
+        let pct = hp.health / hp.maxHealth;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(hpXY[0] - barW/2, hpXY[1] - rad - 5, barW, barH);
+        ctx.fillStyle = pct > 0.6 ? '#0f0' : pct > 0.3 ? '#ff0' : '#f00';
+        ctx.fillRect(hpXY[0] - barW/2, hpXY[1] - rad - 5, barW * pct, barH);
 
-        let hpRadius = 6; //screen pixels for hitpoint marker
-
-        //color by type
-        let baseColor;
-        if (hp.destroyed) {
-            baseColor = '#333';
-        } else if (hp.type === 'in18') {
-            baseColor = '#ff3300'; //big guns = red-orange
-        } else if (hp.type === 'in13') {
-            baseColor = '#ff6600';
-        } else if (hp.type === 'in9') {
-            baseColor = '#ff9900';
-        } else if (hp.type === 'in6') {
-            baseColor = '#ffcc00';
-        } else if (hp.type === 'AA') {
-            baseColor = '#00aaff';
-        } else if (hp.type === 'torpedoMount') {
-            baseColor = '#00ff88';
-        } else if (hp.type === 'hangarBay') {
-            baseColor = '#aa00ff';
-        } else {
-            baseColor = '#888';
-        }
-
-        //draw hitpoint circle
-        ctx.fillStyle = baseColor;
-        ctx.beginPath();
-        ctx.arc(hpScreenXY[0], hpScreenXY[1], hpRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        //highlight if this is the hovered hitpoint
-        if (input.hoveredHitpoint && input.hoveredHitpoint.name === hpName && input.hoveredShip === ship) {
+        //highlight hovered hitpoint
+        if (input.hoveredHitpoint?.name === hpName && input.hoveredShip === ship) {
             ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 2;
+            ctx.lineWidth = 1;
             ctx.beginPath();
-            ctx.arc(hpScreenXY[0], hpScreenXY[1], hpRadius + 2, 0, Math.PI * 2);
+            ctx.arc(hpXY[0], hpXY[1], rad + 3, 0, Math.PI*2);
             ctx.stroke();
-        }
-
-        //mini health bar for hitpoint
-        if (showHealthBars && !hp.destroyed) {
-            let barW = 20;
-            let barH = 3;
-            let barX = hpScreenXY[0] - barW / 2;
-            let barY = hpScreenXY[1] - hpRadius - 6;
-            let hpPct = hp.health / hp.maxHealth;
-
-            ctx.fillStyle = '#222';
-            ctx.fillRect(barX, barY, barW, barH);
-            //green > 60%, yellow 30-60%, red < 30%
-            ctx.fillStyle = hpPct > 0.6 ? '#0f0' : (hpPct > 0.3 ? '#ff0' : '#f00');
-            ctx.fillRect(barX, barY, barW * hpPct, barH);
         }
     }
 }
 
 function renderProjectile(proj) {
-    let screenXY = worldToScreen(proj.positionXY[0], proj.positionXY[1]);
-    let size = proj.type === 'mainCannon' ? 5 : 3;
-    let tailLength = size * 2.5; //teardrop tail
+    let sXY = worldToScreen(proj.positionXY[0], proj.positionXY[1]);
 
-    //calculate angle from velocity
-    let angle = Math.atan2(proj.velocityXY[1], proj.velocityXY[0]);
+    if (proj.type === 'bomb') {
+        let size = 3 / camera.zoom;
+        ctx.fillStyle = '#222';
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], Math.max(size, 2), 0, Math.PI * 2);
+        ctx.fill();
+        return;
+    }
+    if (proj.type === 'torpedo') {
+        let angle = Math.atan2(proj.velocityXY[1], proj.velocityXY[0]);
+        let len = 8 / camera.zoom;
+        ctx.save();
+        ctx.translate(sXY[0], sXY[1]);
+        ctx.rotate(angle);
+        ctx.fillStyle = '#334';
+        ctx.fillRect(-len, -Math.max(1, 2/camera.zoom), len * 2, Math.max(2, 4/camera.zoom));
+        ctx.restore();
+        return;
+    }
+    if (proj.type === 'AA') {
+        //small yellow dot for AA tracer
+        let size = 2 / camera.zoom;
+        ctx.fillStyle = '#ff8';
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], Math.max(size, 1), 0, Math.PI * 2);
+        ctx.fill();
+        return;
+    }
+    //shell projectile - simple circle, scales with zoom
+    let baseSize = proj.type === 'in18' ? 4 : proj.type === 'in13' ? 3.5 : proj.type === 'in9' ? 3 : 2.5;
+    let size = baseSize / camera.zoom;
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath();
+    ctx.arc(sXY[0], sXY[1], Math.max(size, 1.5), 0, Math.PI * 2);
+    ctx.fill();
+}
 
+function renderAircraft(ac, teamId, factionId) {
+    let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+    let sXY = worldToScreen(ac.positionXY[0], ac.positionXY[1]);
+    let faction = game.teams[teamId]?.factions[factionId];
+    let img = images[t.image];
+    let angle = Math.atan2(ac.orientationDir[1], ac.orientationDir[0]) + Math.PI/2;
+    let scale = 25 / camera.zoom; //individual aircraft sprite size
+    let stepX = (t.formationStepX || 20) / camera.zoom; //V spacing horizontal
+    let stepY = (t.formationStepY || 6) / camera.zoom; //V spacing vertical
+    let alive = ac.unitsAlive || Math.ceil(ac.health / t.healthPerUnit);
+
+    //draw each surviving plane in V-formation
     ctx.save();
-    ctx.translate(screenXY[0], screenXY[1]);
+    ctx.translate(sXY[0], sXY[1]);
     ctx.rotate(angle);
 
-    //draw teardrop: circle at front, pointed tail behind
-    //front is in direction of travel (+x after rotation)
-    ctx.fillStyle = '#ffff00';
-    ctx.beginPath();
-    //front circle
-    ctx.arc(0, 0, size, -Math.PI/2, Math.PI/2);
-    //tail going backwards (-x direction)
-    ctx.lineTo(-tailLength, 0);
-    ctx.closePath();
-    ctx.fill();
+    for (let i = 0; i < alive; i++) {
+        //V-formation: leader at front, alternating left/right
+        let side = (i % 2 === 0) ? 1 : -1;
+        let row = Math.floor((i + 1) / 2);
+        let offX = side * row * stepX;
+        let offY = row * stepY;
 
-    //bright hot core
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.arc(0, 0, size * 0.5, 0, Math.PI * 2);
-    ctx.fill();
-
+        if (img) {
+            ctx.drawImage(img, offX - scale/2, offY - scale/2, scale, scale);
+        } else {
+            //fallback triangle
+            ctx.fillStyle = faction?.color || '#888';
+            ctx.beginPath();
+            ctx.moveTo(offX, offY - scale/2);
+            ctx.lineTo(offX - scale/3, offY + scale/2);
+            ctx.lineTo(offX + scale/3, offY + scale/2);
+            ctx.closePath();
+            ctx.fill();
+        }
+    }
     ctx.restore();
+
+    //selection ring - size based on formation width
+    let formationRadius = (alive > 1 ? Math.ceil(alive / 2) * stepX : 0) + scale + 8;
+    if (input.selectedAgents.includes(ac)) {
+        ctx.strokeStyle = faction?.color || '#0f0';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], formationRadius, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    //health bar
+    if (input.selectedAgents.includes(ac) || ac === input.hoveredShip) {
+        let barW = 40, barH = 4;
+        let pct = ac.health / ac.maxHealth;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(sXY[0] - barW/2, sXY[1] - formationRadius - 8, barW, barH);
+        ctx.fillStyle = pct > 0.6 ? '#0f0' : pct > 0.3 ? '#ff0' : '#f00';
+        ctx.fillRect(sXY[0] - barW/2, sXY[1] - formationRadius - 8, barW * pct, barH);
+    }
+}
+
+function renderAircraftShadow(ac) {
+    let t = AIRCRAFT_TEMPLATES[ac.aircraftType];
+    let alt = ac.positionXYZ[2] || 500;
+    let shadowOffset = alt * 0.15;
+    let stepX = (t.formationStepX || 20);
+    let stepY = (t.formationStepY || 6);
+    let alive = ac.unitsAlive || Math.ceil(ac.health / t.healthPerUnit);
+    //angle+PI/2 because aircraft rendering uses that offset
+    let angle = Math.atan2(ac.orientationDir[1], ac.orientationDir[0]) + Math.PI/2;
+    let cos = Math.cos(angle), sin = Math.sin(angle);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    for (let i = 0; i < alive; i++) {
+        let side = (i % 2 === 0) ? 1 : -1;
+        let row = Math.floor((i + 1) / 2);
+        let offX = side * row * stepX;
+        let offY = row * stepY;
+        //rotate offset by aircraft orientation (same transform as rendering)
+        let rotX = offX * cos - offY * sin;
+        let rotY = offX * sin + offY * cos;
+        let shadowX = ac.positionXY[0] + rotX - SUN_DIR[0] * shadowOffset;
+        let shadowY = ac.positionXY[1] + rotY - SUN_DIR[1] * shadowOffset;
+        let sXY = worldToScreen(shadowX, shadowY);
+        ctx.beginPath();
+        ctx.ellipse(sXY[0], sXY[1], 12/camera.zoom, 6/camera.zoom, angle, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function renderWaterTrail(vfx) {
+    let sXY = worldToScreen(vfx.positionXY[0], vfx.positionXY[1]);
+    let alpha = 0.35 * (1 - vfx.age / vfx.maxAge);
+    let len = vfx.length / camera.zoom;
+    let width = (vfx.width || 8) / camera.zoom;
+    ctx.strokeStyle = `rgba(200,230,255,${alpha})`;
+    ctx.lineWidth = Math.max(width, 1);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(sXY[0], sXY[1]);
+    ctx.lineTo(sXY[0] - vfx.dir[0] * len, sXY[1] - vfx.dir[1] * len);
+    ctx.stroke();
 }
 
 function renderVFX(vfx) {
-    let screenXY = worldToScreen(vfx.positionXY[0], vfx.positionXY[1]);
-    let alpha = 1 - (vfx.age / vfx.maxAge);
-    let size = vfx.type === 'hit' ? 20 : 15;
-    size = size * (1 + vfx.age * 0.5); //expand over time
+    let sXY = worldToScreen(vfx.positionXY[0], vfx.positionXY[1]);
+    let alpha = 1 - vfx.age / vfx.maxAge;
 
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = vfx.type === 'hit' ? '#ff8800' : '#88ccff';
-    ctx.beginPath();
-    ctx.arc(screenXY[0], screenXY[1], size / camera.zoom, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    if (vfx.type === 'AAstream') {
+        //yellow stream from gun to target
+        let tXY = worldToScreen(vfx.targetXY[0], vfx.targetXY[1]);
+        ctx.strokeStyle = `rgba(255,255,100,${alpha})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(sXY[0], sXY[1]);
+        ctx.lineTo(tXY[0], tXY[1]);
+        ctx.stroke();
+    } else if (vfx.type === 'AAburst') {
+        //bright flash then grey cloud
+        let size = 10 + vfx.age * 20;
+        if (vfx.age < 0.3) {
+            ctx.fillStyle = `rgba(255,255,200,${alpha})`;
+        } else {
+            ctx.fillStyle = `rgba(100,100,100,${alpha * 0.5})`;
+        }
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], size / camera.zoom, 0, Math.PI * 2);
+        ctx.fill();
+    } else if (vfx.type === 'hit') {
+        let size = 20 * (1 + vfx.age * 0.5);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#f80';
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], size / camera.zoom, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    } else if (vfx.type === 'splash') {
+        let size = 15 * (1 + vfx.age * 0.5);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = '#8cf';
+        ctx.beginPath();
+        ctx.arc(sXY[0], sXY[1], size / camera.zoom, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
 }
 
 // === INPUT HANDLING ===
@@ -1495,6 +2279,11 @@ canvas.addEventListener('mousedown', e => {
         input.dragStartXY = [e.offsetX, e.offsetY];
         input.dragEndXY = [...input.dragStartXY];
     }
+    if (e.button === 1) { //middle click - pan/rotate
+        e.preventDefault();
+        input.middleDragging = true;
+        input.middleStartXY = [e.offsetX, e.offsetY];
+    }
 });
 
 canvas.addEventListener('mousemove', e => {
@@ -1503,6 +2292,19 @@ canvas.addEventListener('mousemove', e => {
 
     if (input.isDragging) {
         input.dragEndXY = [e.offsetX, e.offsetY];
+    }
+    if (input.middleDragging && input.middleStartXY) {
+        let dx = e.offsetX - input.middleStartXY[0];
+        let dy = e.offsetY - input.middleStartXY[1];
+        //horizontal drag = rotate view, vertical drag = pan
+        camera.rotation += dx * 0.003;
+        //pan in rotated space
+        let cos = Math.cos(-camera.rotation), sin = Math.sin(-camera.rotation);
+        let panX = dy * sin * camera.zoom;
+        let panY = dy * cos * camera.zoom;
+        camera.x -= panX;
+        camera.y -= panY;
+        input.middleStartXY = [e.offsetX, e.offsetY];
     }
 });
 
@@ -1526,6 +2328,11 @@ canvas.addEventListener('mouseup', e => {
         }
     }
 
+    if (e.button === 1) { //middle mouse release
+        input.middleDragging = false;
+        input.middleStartXY = null;
+    }
+
     if (e.button === 2) { //right click - move/target command
         let worldXY = screenToWorld(e.offsetX, e.offsetY);
 
@@ -1534,34 +2341,54 @@ canvas.addEventListener('mouseup', e => {
         if (clickedResult && parseInt(clickedResult.teamId) !== localPlayer.team) {
             //targeting an enemy ship
             let enemyShip = clickedResult.ship;
-
-            //check if clicking on a specific hitpoint
             let hpResult = getHitpointAtPoint(worldXY, enemyShip);
 
-            for (let ship of input.selectedAgents) {
-                if (hpResult) {
-                    //target specific hitpoint
-                    ship.targetMode = 'hitpoint';
-                    ship.lockedTarget = enemyShip;
-                    ship.lockedHitpoint = hpResult.name;
-                } else {
-                    //target whole ship
-                    ship.targetMode = 'agent';
-                    ship.lockedTarget = enemyShip;
-                    ship.lockedHitpoint = null;
+            for (let unit of input.selectedAgents) {
+                if (unit.shipType) {
+                    //manual torpedo mode: fire at target
+                    if (unit.manualTorpedoMode && unit.torpedoCount > 0) {
+                        fireManualTorpedo(unit, enemyShip);
+                        unit.manualTorpedoMode = false;
+                    } else {
+                        //normal targeting
+                        if (hpResult) {
+                            unit.targetMode = 'hitpoint';
+                            unit.lockedTarget = enemyShip;
+                            unit.lockedHitpoint = hpResult.name;
+                        } else {
+                            unit.targetMode = 'agent';
+                            unit.lockedTarget = enemyShip;
+                            unit.lockedHitpoint = null;
+                        }
+                        unit.targetPositionXY = [...enemyShip.positionXY];
+                    }
+                } else if (unit.aircraftType) {
+                    //aircraft: set bomb target if armed, else move
+                    if ((unit.armed && unit.bombs > 0) || unit.torpedoes > 0) {
+                        unit.state = 'bombing';
+                        unit.bombTarget = enemyShip;
+                    } else {
+                        unit.state = 'moving';
+                        unit.targetPositionXY = [...enemyShip.positionXY];
+                    }
                 }
-                //also move toward target
-                ship.targetPositionXY = [...enemyShip.positionXY];
             }
         } else {
-            //move command (clear targeting)
-            for (let ship of input.selectedAgents) {
-                ship.targetPositionXY = [...worldXY];
-                ship.targetMode = 'auto';
-                ship.lockedTarget = null;
-                ship.lockedHitpoint = null;
+            //move command - also clear torpedo mode
+            for (let unit of input.selectedAgents) {
+                if (unit.shipType) {
+                    unit.targetPositionXY = [...worldXY];
+                    unit.targetMode = 'auto';
+                    unit.lockedTarget = null;
+                    unit.lockedHitpoint = null;
+                    unit.manualTorpedoMode = false;
+                } else if (unit.aircraftType) {
+                    unit.state = 'moving';
+                    unit.targetPositionXY = [...worldXY];
+                }
             }
         }
+        updateBottomPanel();
     }
 });
 
@@ -1595,6 +2422,7 @@ document.addEventListener('keyup', e => {
 
 function selectAtPoint(worldXY) {
     if (!input.shiftHeld) input.selectedAgents = [];
+    let found = false;
 
     //find ship under click (only own faction)
     forEachShip((ship, teamId, factionId) => {
@@ -1605,11 +2433,27 @@ function selectAtPoint(worldXY) {
             let idx = input.selectedAgents.indexOf(ship);
             if (idx === -1) {
                 input.selectedAgents.push(ship);
+                found = true;
             } else if (input.shiftHeld) {
-                input.selectedAgents.splice(idx, 1); //toggle off
+                input.selectedAgents.splice(idx, 1);
             }
         }
     });
+
+    //also check aircraft
+    forEachAircraft((ac, teamId, factionId) => {
+        if (parseInt(teamId) !== localPlayer.team) return;
+        if (factionId !== localPlayer.faction) return;
+        if (dist(worldXY, ac.positionXY) < 50) {
+            if (!input.selectedAgents.includes(ac)) {
+                input.selectedAgents.push(ac);
+                found = true;
+            }
+        }
+    });
+
+    if (found) playSound('select', worldXY);
+    updateBottomPanel();
 }
 
 function selectInRect(startWorld, endWorld) {
@@ -1623,27 +2467,225 @@ function selectInRect(startWorld, endWorld) {
     forEachShip((ship, teamId, factionId) => {
         if (parseInt(teamId) !== localPlayer.team) return;
         if (factionId !== localPlayer.faction) return;
-
-        let x = ship.positionXY[0];
-        let y = ship.positionXY[1];
-
+        let x = ship.positionXY[0], y = ship.positionXY[1];
         if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-            if (!input.selectedAgents.includes(ship)) {
+            let idx = input.selectedAgents.indexOf(ship);
+            if (input.shiftHeld && idx !== -1) {
+                input.selectedAgents.splice(idx, 1); //toggle off
+            } else if (idx === -1) {
                 input.selectedAgents.push(ship);
             }
         }
     });
+
+    forEachAircraft((ac, teamId, factionId) => {
+        if (parseInt(teamId) !== localPlayer.team) return;
+        if (factionId !== localPlayer.faction) return;
+        let x = ac.positionXY[0], y = ac.positionXY[1];
+        if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+            let idx = input.selectedAgents.indexOf(ac);
+            if (input.shiftHeld && idx !== -1) {
+                input.selectedAgents.splice(idx, 1); //toggle off
+            } else if (idx === -1) {
+                input.selectedAgents.push(ac);
+            }
+        }
+    });
+
+    if (input.selectedAgents.length > 0) playSound('select', [(minX+maxX)/2, (minY+maxY)/2]);
+    updateBottomPanel();
+}
+
+// === BOTTOM UI PANEL ===
+
+function updateBottomPanel() {
+    let panel = document.getElementById('bottomPanel');
+    let container = document.getElementById('selectedUnitsContainer');
+    let actionsDiv = document.getElementById('actionButtons');
+
+    if (input.selectedAgents.length === 0) {
+        panel.classList.remove('visible');
+        return;
+    }
+
+    panel.classList.add('visible');
+    container.innerHTML = '';
+    actionsDiv.innerHTML = '';
+
+    //show cards for each selected unit - click to select only that unit
+    for (let i = 0; i < input.selectedAgents.length; i++) {
+        let unit = input.selectedAgents[i];
+        let card = document.createElement('div');
+        card.className = 'unitCard';
+        let isShip = unit.shipType !== undefined;
+        let typeName = isShip ? unit.shipType : unit.aircraftType;
+        let icon = isShip ? (typeName === 'carrier' ? '⛴' : '🚢') : '✈';
+        let pct = unit.health / unit.maxHealth;
+        card.innerHTML = `
+            <div class="unitIcon">${icon}</div>
+            <span>${typeName}</span>
+            <div class="healthBar"><div class="healthFill" style="width:${pct*100}%;background:${pct>0.6?'#0f0':pct>0.3?'#ff0':'#f00'}"></div></div>
+        `;
+        let idx = i;
+        card.onclick = () => { input.selectedAgents = [input.selectedAgents[idx]]; updateBottomPanel(); };
+        container.appendChild(card);
+    }
+
+    //show actions based on selected type
+    let firstUnit = input.selectedAgents[0];
+    let isShip = firstUnit.shipType !== undefined;
+
+    if (isShip && firstUnit.shipType === 'carrier') {
+        //carrier: show squadron launch options
+        actionsDiv.innerHTML = '<h4 style="color:#8cf;margin:0 0 6px">Squadrons</h4>';
+        if (firstUnit.storedSquadrons) {
+            for (let i = 0; i < firstUnit.storedSquadrons.length; i++) {
+                let sq = firstUnit.storedSquadrons[i];
+                if (sq.count <= 0) continue;
+                let row = document.createElement('div');
+                row.className = 'squadronRow';
+                row.innerHTML = `
+                    <span>${sq.type.replace('Squadron','')} x${sq.count}</span>
+                    <button class="launchBtn" onclick="launchSquadron(${input.selectedAgents.indexOf(firstUnit)}, ${i})">Launch</button>
+                `;
+                actionsDiv.appendChild(row);
+            }
+        }
+    } else if (isShip && firstUnit.torpedoCount > 0) {
+        //ships with torpedoes: manual fire option
+        let btn = document.createElement('button');
+        btn.className = 'actionBtn';
+        btn.textContent = `Fire Torpedoes (${firstUnit.torpedoCount} left)`;
+        btn.onclick = () => setManualTorpedoMode();
+        actionsDiv.appendChild(btn);
+    } else if (!isShip) {
+        //aircraft: show arm/behavior options
+        let t = AIRCRAFT_TEMPLATES[firstUnit.aircraftType];
+        if (t.bombCapacity && !firstUnit.armed && firstUnit.homeCarrier) {
+            let btn = document.createElement('button');
+            btn.className = 'actionBtn';
+            btn.textContent = 'Return to Arm Bombs';
+            btn.onclick = () => returnToArmBombs();
+            actionsDiv.appendChild(btn);
+        }
+        if (firstUnit.armed && firstUnit.bombs > 0) {
+            let btn = document.createElement('button');
+            btn.className = 'actionBtn';
+            btn.textContent = `Attack (${firstUnit.bombs} bombs)`;
+            btn.onclick = () => setBombingMode();
+            actionsDiv.appendChild(btn);
+        }
+        //return to carrier button
+        if (firstUnit.homeCarrier && firstUnit.state !== 'returning') {
+            let btn = document.createElement('button');
+            btn.className = 'actionBtn';
+            btn.textContent = 'Return to Carrier';
+            btn.onclick = () => returnToCarrier();
+            actionsDiv.appendChild(btn);
+        }
+    }
+}
+
+function launchSquadron(shipIdx, sqIdx) {
+    let carrier = input.selectedAgents[shipIdx];
+    if (!carrier || !carrier.storedSquadrons) return;
+    let sq = carrier.storedSquadrons[sqIdx];
+    if (!sq || sq.count <= 0) return;
+
+    sq.count--;
+
+    //create squadron at carrier position, launching state
+    let template = AIRCRAFT_TEMPLATES[sq.type];
+    let spawnPos = [
+        carrier.positionXY[0] + carrier.orientationDir[0] * 50,
+        carrier.positionXY[1] + carrier.orientationDir[1] * 50,
+        50 //low altitude during launch
+    ];
+    let ac = new Aircraft(carrier.team, carrier.faction, sq.type, spawnPos,
+                         carrier.orientationDir, template.maxHealth, carrier);
+    ac.state = 'launching';
+    ac.launchProgress = 0;
+
+    //add to active agents
+    game.activeAgents[carrier.team][carrier.faction].aircraft.push(ac);
+    updateBottomPanel();
+}
+
+function returnToArmBombs() {
+    //return to carrier and set flag to arm when landing
+    for (let unit of input.selectedAgents) {
+        if (unit.aircraftType && unit.homeCarrier) {
+            unit.state = 'returning';
+            unit.armOnLanding = true;
+        }
+    }
+    updateBottomPanel();
+}
+
+function setBombingMode() {
+    //next right-click will set bomb target
+    for (let unit of input.selectedAgents) {
+        if (unit.aircraftType && unit.armed && unit.bombs > 0) {
+            unit.state = 'bombing';
+        }
+    }
+}
+
+function returnToCarrier() {
+    for (let unit of input.selectedAgents) {
+        if (unit.aircraftType && unit.homeCarrier) {
+            unit.state = 'returning';
+            unit.armOnLanding = false;
+        }
+    }
+    updateBottomPanel();
+}
+
+function setManualTorpedoMode() {
+    //flag ships for manual torpedo fire on next right-click
+    for (let unit of input.selectedAgents) {
+        if (unit.shipType && unit.torpedoCount > 0) {
+            unit.manualTorpedoMode = true;
+        }
+    }
+    updateBottomPanel();
+}
+
+function fireManualTorpedo(ship, target) {
+    if (ship.torpedoCount <= 0) return;
+    //find an active torpedo mount
+    for (let hpName in ship.hitpoints) {
+        let hp = ship.hitpoints[hpName];
+        if (hp.type === 'torpedoMount' && !hp.destroyed) {
+            let hpXY = getHitpointWorldPos(ship, hp);
+            playSound('splash', hpXY);
+            let dir = normalize([target.positionXY[0] - hpXY[0], target.positionXY[1] - hpXY[1]]);
+            let speed = HITPOINT_TYPES.torpedoMount.projectileSpeed;
+            game.activeProjectiles.push({
+                id: randomId(), positionXY: [...hpXY],
+                velocityXY: [dir[0] * speed, dir[1] * speed],
+                destinationXY: [...target.positionXY],
+                damage: HITPOINT_TYPES.torpedoMount.damage,
+                sourceTeam: ship.team, type: 'torpedo', targetShip: target
+            });
+            ship.torpedoCount--;
+            updateBottomPanel();
+            return;
+        }
+    }
 }
 
 // === INITIALIZATION ===
 
-window.onload = function() {
+window.onload = async function() {
+    //load aircraft images (non-blocking, fallback to triangles if fail)
+    loadAllImages().catch(() => console.log('Some aircraft images failed to load'));
+
     if (loadPlayerIdentity()) {
         document.getElementById('loginPopup').classList.add('hidden');
         game.phase = 'menu';
         showMenu();
     }
-    //else login popup is already visible
 };
 
 
