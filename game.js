@@ -212,7 +212,9 @@ let input = {
     dragEndXY: null,
     mouseScreenXY: [0, 0],
     mouseWorldXY: [0, 0],
-    shiftHeld: false
+    shiftHeld: false,
+    hoveredShip: null, //ship currently under mouse cursor
+    hoveredHitpoint: null //hitpoint currently under mouse (if any)
 };
 
 // === CANVAS SETUP ===
@@ -596,7 +598,8 @@ function spawnSupremacyFleet(teamId, factionId, centerXY, facingDir) {
     let spacing = 400; //meters between ships
     let agents = [];
 
-    //arrange ships in a line perpendicular to facing direction
+    //arrange ships in a line perpendicular to facing direction --> this is a temporary solution. We will eventually 
+    //spawn them in nice formations.
     let perpDir = [-facingDir[1], facingDir[0]];
     let startOffset = -((ships.length - 1) / 2) * spacing;
 
@@ -632,7 +635,8 @@ function startGame() {
         }
     }
 
-    //spawn fleets based on gamemode
+    //spawn fleets based on gamemode --> this is only meaningful in the context that the center eventually means something
+    //when we spawn them in formations later on.
     let teamPositions = [
         {center: [-3000, 0], facing: [1, 0]},   //team 0 spawns left, faces right
         {center: [3000, 0], facing: [-1, 0]},   //team 1 spawns right, faces left
@@ -703,13 +707,16 @@ function gameLoop(currentTime) {
     if (dt > 0.1) dt = 0.1; //cap dt to prevent spiral of death on lag spikes
 
     if (!game.isPaused && game.phase === 'playing') {
-        targetAndFire(dt);
+        targetAndFireAndUpdateCollisions(dt);
         updateProjectiles(dt);
         updateMovement(dt);
         updateVFX(dt);
         pruneDeadAgents();
         game.time += dt;
     }
+
+    //always update hover even when paused
+    if (game.phase === 'playing') updateHover();
 
     render();
     requestAnimationFrame(gameLoop);
@@ -769,7 +776,7 @@ function updateMovement(dt) {
 
 // === TARGETING AND FIRING ===
 
-function targetAndFire(dt) {
+function targetAndFireAndUpdateCollisions(dt) {
     forEachShip(ship => {
         //update all cooldowns first
         for (let hpName in ship.hitpoints) {
@@ -795,8 +802,36 @@ function targetAndFire(dt) {
 
             //AA hitpoints: distance-based, targets aircraft only (not implemented yet)
             //will add when aircraft exist
+
+        } else if (ship.targetMode === 'agent' || ship.targetMode === 'hitpoint') {
+            //locked onto specific target
+            let target = ship.lockedTarget;
+
+            //validate target still exists and is enemy
+            if (!target || target.health <= 0) {
+                ship.targetMode = 'auto';
+                ship.lockedTarget = null;
+                ship.lockedHitpoint = null;
+                return;
+            }
+
+            //non-AA hitpoints fire at locked target
+            for (let hpName in ship.hitpoints) {
+                let hp = ship.hitpoints[hpName];
+                if (hp.destroyed || hp.type === 'AA') continue;
+                if (hp.cooldown > 0.0001) continue;
+
+                let range = HITPOINT_TYPES[hp.type].range;
+                let d = dist(ship.positionXY, target.positionXY);
+                if (d <= range) {
+                    fireAtShip(ship, hp, target, ship.lockedHitpoint);
+                    hp.cooldown = HITPOINT_TYPES[hp.type].maxCooldown;
+                }
+            }
+
+            //keep updating target position for pursuit
+            ship.targetPositionXY = [...target.positionXY];
         }
-        //TODO: 'agent' and 'hitpoint' target modes
     });
 }
 
@@ -825,8 +860,8 @@ function findBestShipTarget(ship, hp) {
 
 function getHitpointWorldPos(ship, hp) {
     //transform hitpoint relative position by ship orientation
-    let cos = ship.orientationDir[0];
-    let sin = ship.orientationDir[1];
+    let xDir = ship.orientationDir[0];
+    let yDir = ship.orientationDir[1];
     let relX = hp.relPosXY[0];
     let relY = hp.relPosXY[1];
 
@@ -834,25 +869,25 @@ function getHitpointWorldPos(ship, hp) {
     //note: relY is along ship length (forward is positive Y in local space)
     //ship.orientationDir points in the direction the ship is facing
     return [
-        ship.positionXY[0] + relX * (-sin) + relY * cos,
-        ship.positionXY[1] + relX * cos + relY * sin
+        ship.positionXY[0] + relX * (-yDir) + relY * xDir,
+        ship.positionXY[1] + relX * xDir + relY * yDir
     ];
 }
 
-function fireAtShip(shooter, hp, target) {
-    let hpWorldXY = getHitpointWorldPos(shooter, shooter.hitpoints[Object.keys(shooter.hitpoints).find(k => shooter.hitpoints[k] === hp)] || hp);
-    //fix: get proper hp reference
-    for (let hpName in shooter.hitpoints) {
-        if (shooter.hitpoints[hpName] === hp) {
-            hpWorldXY = getHitpointWorldPos(shooter, shooter.hitpoints[hpName]);
-            break;
-        }
-    }
-
+function fireAtShip(shooter, hp, target, targetHitpointName = null) {
+    let hpWorldXY = getHitpointWorldPos(shooter, hp);
     let projSpeed = HITPOINT_TYPES[hp.type].projectileSpeed;
 
+    //determine aim point - either specific hitpoint or ship center
+    let baseAimXY;
+    if (targetHitpointName && target.hitpoints[targetHitpointName]) {
+        baseAimXY = getHitpointWorldPos(target, target.hitpoints[targetHitpointName]);
+    } else {
+        baseAimXY = [...target.positionXY];
+    }
+
     //lead targeting: predict where target will be
-    let d = dist(hpWorldXY, target.positionXY);
+    let d = dist(hpWorldXY, baseAimXY);
     let timeToHit = d / projSpeed;
 
     let targetVelXY = [
@@ -860,8 +895,8 @@ function fireAtShip(shooter, hp, target) {
         target.orientationDir[1] * target.currentSpeed
     ];
     let aimPointXY = [
-        target.positionXY[0] + targetVelXY[0] * timeToHit,
-        target.positionXY[1] + targetVelXY[1] * timeToHit
+        baseAimXY[0] + targetVelXY[0] * timeToHit,
+        baseAimXY[1] + targetVelXY[1] * timeToHit
     ];
 
     //accuracy error applied at fire time, scales with distance
@@ -880,7 +915,7 @@ function fireAtShip(shooter, hp, target) {
         damage: HITPOINT_TYPES[hp.type].damage,
         sourceTeam: shooter.team,
         type: hp.type,
-        targetShip: target //reference for potential tracking, though shells don't track
+        targetShip: target
     });
 }
 
@@ -920,6 +955,8 @@ function findShipAtPoint(pointXY, excludeTeam) {
     return found;
 }
 
+
+
 function pointInShip(pointXY, ship) {
     let template = SHIP_TEMPLATES[ship.shipType];
     let halfBeam = template.beam / 2;
@@ -938,6 +975,52 @@ function pointInShip(pointXY, ship) {
 
     //simple rectangle check for now (pointed bow comes in rendering)
     return Math.abs(localX) < halfBeam && Math.abs(localY) < halfLength;
+}
+
+//find which ship (if any) is under a world point, returns {ship, teamId, factionId} or null
+function getShipAtPoint(pointXY) {
+    let result = null;
+    forEachShip((ship, teamId, factionId) => {
+        if (result) return;
+        if (pointInShip(pointXY, ship)) {
+            result = {ship, teamId, factionId};
+        }
+    });
+    return result;
+}
+
+//find which hitpoint on a ship is under a world point (within hitpoint radius)
+function getHitpointAtPoint(pointXY, ship) {
+    let hitpointRadius = 15; //meters, clickable radius for hitpoints
+    let closest = null;
+    let closestDist = hitpointRadius;
+
+    for (let hpName in ship.hitpoints) {
+        let hp = ship.hitpoints[hpName];
+        let hpWorldXY = getHitpointWorldPos(ship, hp);
+        let d = dist(pointXY, hpWorldXY);
+        if (d < closestDist) {
+            closestDist = d;
+            closest = {name: hpName, hp: hp};
+        }
+    }
+    return closest;
+}
+
+//update what ship/hitpoint the mouse is hovering over
+function updateHover() {
+    input.hoveredShip = null;
+    input.hoveredHitpoint = null;
+
+    let result = getShipAtPoint(input.mouseWorldXY);
+    if (result) {
+        input.hoveredShip = result.ship;
+        //check if hovering over a specific hitpoint
+        let hpResult = getHitpointAtPoint(input.mouseWorldXY, result.ship);
+        if (hpResult) {
+            input.hoveredHitpoint = hpResult;
+        }
+    }
 }
 
 function applyDamageToShip(ship, damage, impactXY) {
@@ -1093,15 +1176,21 @@ function renderShip(ship, teamId, factionId) {
 
     ctx.restore();
 
+    let isSelected = input.selectedAgents.includes(ship);
+    let isHovered = input.hoveredShip === ship;
+    let showDetails = isSelected || isHovered;
+
     //selection ring
-    if (input.selectedAgents.includes(ship)) {
+    if (isSelected) {
         ctx.strokeStyle = '#00ff00';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(screenXY[0], screenXY[1], Math.max(screenBeam, screenLength) / 2 + 5, 0, Math.PI * 2);
         ctx.stroke();
+    }
 
-        //health bar
+    //health bar (show for selected or hovered ships)
+    if (showDetails) {
         let barW = 50;
         let barH = 6;
         let barX = screenXY[0] - barW / 2;
@@ -1110,19 +1199,101 @@ function renderShip(ship, teamId, factionId) {
 
         ctx.fillStyle = '#333';
         ctx.fillRect(barX, barY, barW, barH);
-        ctx.fillStyle = healthPct > 0.3 ? '#0f0' : '#f00';
+        //green > 60%, yellow 30-60%, red < 30%
+        ctx.fillStyle = healthPct > 0.6 ? '#0f0' : (healthPct > 0.3 ? '#ff0' : '#f00');
         ctx.fillRect(barX, barY, barW * healthPct, barH);
+
+        //render hitpoints
+        renderShipHitpoints(ship, isHovered);
+    }
+}
+
+function renderShipHitpoints(ship, showHealthBars) {
+    for (let hpName in ship.hitpoints) {
+        let hp = ship.hitpoints[hpName];
+        let hpWorldXY = getHitpointWorldPos(ship, hp);
+        let hpScreenXY = worldToScreen(hpWorldXY[0], hpWorldXY[1]);
+
+        let hpRadius = 6; //screen pixels for hitpoint marker
+
+        //color by type
+        let baseColor;
+        if (hp.destroyed) {
+            baseColor = '#333'; //destroyed = dark grey
+        } else if (hp.type === 'mainCannon') {
+            baseColor = '#ff6600';
+        } else if (hp.type === 'secondaryCannon') {
+            baseColor = '#ffaa00';
+        } else if (hp.type === 'AA') {
+            baseColor = '#00aaff';
+        } else if (hp.type === 'hangarBay') {
+            baseColor = '#aa00ff';
+        } else {
+            baseColor = '#888';
+        }
+
+        //draw hitpoint circle
+        ctx.fillStyle = baseColor;
+        ctx.beginPath();
+        ctx.arc(hpScreenXY[0], hpScreenXY[1], hpRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        //highlight if this is the hovered hitpoint
+        if (input.hoveredHitpoint && input.hoveredHitpoint.name === hpName && input.hoveredShip === ship) {
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(hpScreenXY[0], hpScreenXY[1], hpRadius + 2, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        //mini health bar for hitpoint
+        if (showHealthBars && !hp.destroyed) {
+            let barW = 20;
+            let barH = 3;
+            let barX = hpScreenXY[0] - barW / 2;
+            let barY = hpScreenXY[1] - hpRadius - 6;
+            let hpPct = hp.health / hp.maxHealth;
+
+            ctx.fillStyle = '#222';
+            ctx.fillRect(barX, barY, barW, barH);
+            //green > 60%, yellow 30-60%, red < 30%
+            ctx.fillStyle = hpPct > 0.6 ? '#0f0' : (hpPct > 0.3 ? '#ff0' : '#f00');
+            ctx.fillRect(barX, barY, barW * hpPct, barH);
+        }
     }
 }
 
 function renderProjectile(proj) {
     let screenXY = worldToScreen(proj.positionXY[0], proj.positionXY[1]);
-    let size = proj.type === 'mainCannon' ? 4 : 2;
+    let size = proj.type === 'mainCannon' ? 5 : 3;
+    let tailLength = size * 2.5; //teardrop tail
 
+    //calculate angle from velocity
+    let angle = Math.atan2(proj.velocityXY[1], proj.velocityXY[0]);
+
+    ctx.save();
+    ctx.translate(screenXY[0], screenXY[1]);
+    ctx.rotate(angle);
+
+    //draw teardrop: circle at front, pointed tail behind
+    //front is in direction of travel (+x after rotation)
     ctx.fillStyle = '#ffff00';
     ctx.beginPath();
-    ctx.arc(screenXY[0], screenXY[1], size, 0, Math.PI * 2);
+    //front circle
+    ctx.arc(0, 0, size, -Math.PI/2, Math.PI/2);
+    //tail going backwards (-x direction)
+    ctx.lineTo(-tailLength, 0);
+    ctx.closePath();
     ctx.fill();
+
+    //bright hot core
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
 }
 
 function renderVFX(vfx) {
@@ -1180,10 +1351,41 @@ canvas.addEventListener('mouseup', e => {
         }
     }
 
-    if (e.button === 2) { //right click - move command
+    if (e.button === 2) { //right click - move/target command
         let worldXY = screenToWorld(e.offsetX, e.offsetY);
-        for (let ship of input.selectedAgents) {
-            ship.targetPositionXY = [...worldXY];
+
+        //check if clicking on an enemy ship
+        let clickedResult = getShipAtPoint(worldXY);
+        if (clickedResult && parseInt(clickedResult.teamId) !== localPlayer.team) {
+            //targeting an enemy ship
+            let enemyShip = clickedResult.ship;
+
+            //check if clicking on a specific hitpoint
+            let hpResult = getHitpointAtPoint(worldXY, enemyShip);
+
+            for (let ship of input.selectedAgents) {
+                if (hpResult) {
+                    //target specific hitpoint
+                    ship.targetMode = 'hitpoint';
+                    ship.lockedTarget = enemyShip;
+                    ship.lockedHitpoint = hpResult.name;
+                } else {
+                    //target whole ship
+                    ship.targetMode = 'agent';
+                    ship.lockedTarget = enemyShip;
+                    ship.lockedHitpoint = null;
+                }
+                //also move toward target
+                ship.targetPositionXY = [...enemyShip.positionXY];
+            }
+        } else {
+            //move command (clear targeting)
+            for (let ship of input.selectedAgents) {
+                ship.targetPositionXY = [...worldXY];
+                ship.targetMode = 'auto';
+                ship.lockedTarget = null;
+                ship.lockedHitpoint = null;
+            }
         }
     }
 });
@@ -1268,3 +1470,6 @@ window.onload = function() {
     }
     //else login popup is already visible
 };
+
+
+
