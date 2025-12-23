@@ -906,51 +906,44 @@ function spawnFormation(formation, teamId, factionId, spawnPosXY, spawnOrientati
 
     //formation orientation is the "default" facing in the formation dict
     //we rotate everything so that default facing becomes spawnOrientation
-    let formOri = formation.formationOrientation || [0, -1]; //default facing up
+    let fromDir = normalize(formation.formationOrientation || [0, -1]);
+    let toDir = normalize(spawnOrientation);
 
-    //calculate rotation from formation orientation to spawn orientation
-    let fromAngle = Math.atan2(formOri[1], formOri[0]);
-    let toAngle = Math.atan2(spawnOrientation[1], spawnOrientation[0]);
-    let rotAngle = toAngle - fromAngle;
-    let cos = Math.cos(rotAngle);
-    let sin = Math.sin(rotAngle);
+    //build rotation matrix directly from vectors (no angle calculation needed)
+    //cos(θ) = dot product, sin(θ) = 2D cross product
+    let cos = fromDir[0] * toDir[0] + fromDir[1] * toDir[1];
+    let sin = fromDir[0] * toDir[1] - fromDir[1] * toDir[0];
+
+    //helper: rotate a 2D vector by the rotation matrix
+    let rotateVec = (v) => [
+        v[0] * cos - v[1] * sin,
+        v[0] * sin + v[1] * cos
+    ];
 
     //spawn ships
     if (formation.shipFormation) {
         for (let shipDef of formation.shipFormation) {
-            //rotate position relative to formation center
-            let rx = shipDef.position[0] * cos - shipDef.position[1] * sin;
-            let ry = shipDef.position[0] * sin + shipDef.position[1] * cos;
-            let worldPos = [spawnPosXY[0] + rx, spawnPosXY[1] + ry];
-
-            //rotate orientation
-            let oriX = shipDef.orientation[0] * cos - shipDef.orientation[1] * sin;
-            let oriY = shipDef.orientation[0] * sin + shipDef.orientation[1] * cos;
-            let worldOri = normalize([oriX, oriY]);
+            let rotatedPos = rotateVec(shipDef.position);
+            let worldPos = [spawnPosXY[0] + rotatedPos[0], spawnPosXY[1] + rotatedPos[1]];
+            let worldOri = normalize(rotateVec(shipDef.orientation));
 
             let ship = createShip(teamId, factionId, shipDef.type, worldPos, worldOri);
             if (ship) result.ships.push(ship);
         }
     }
-
     //spawn aircraft (if any)
     if (formation.aircraftFormation) {
         for (let acDef of formation.aircraftFormation) {
-            let rx = acDef.position[0] * cos - acDef.position[1] * sin;
-            let ry = acDef.position[0] * sin + acDef.position[1] * cos;
-            let worldPos = [spawnPosXY[0] + rx, spawnPosXY[1] + ry, 500]; //default altitude 500m
-
-            let oriX = acDef.orientation[0] * cos - acDef.orientation[1] * sin;
-            let oriY = acDef.orientation[0] * sin + acDef.orientation[1] * cos;
-            let worldOri = normalize([oriX, oriY]);
+            let rotatedPos = rotateVec(acDef.position);
+            let worldPos = [spawnPosXY[0] + rotatedPos[0], spawnPosXY[1] + rotatedPos[1], 500];
+            let worldOri = normalize(rotateVec(acDef.orientation));
 
             let ac = createAircraft(teamId, factionId, acDef.type, worldPos, worldOri);
             if (ac) result.aircraft.push(ac);
         }
     }
-
     return result;
-} 
+}
 
 
 
@@ -1245,6 +1238,20 @@ function updateAircraft(dt) {
         }
         //launching - takeoff animation from carrier
         else if (ac.state === 'launching') {
+            //animations from a const structure 
+            //anim = animations[aircraft];
+            // f=loadPNG("fighterPlane.png");
+            // squadronPreAnimationMode = true;
+            // let acSpeed = 0;
+            // for(let i=0;i<12;i++){
+            //     while(speed<160){
+            //         t.maxSpeed
+            //     }
+            // }
+            
+            
+
+            //animation logic
             ac.launchProgress += dt;
             if (ac.homeCarrier && ac.homeCarrier.health > 0) {
                 //move along carrier deck, then climb
